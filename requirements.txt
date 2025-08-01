@@ -1,5 +1,5 @@
 fastapi
 uvicorn
-python-telegram-bot==20.7
+pyTelegramBotAPI
 requests
 aiohttp==3.9.5
