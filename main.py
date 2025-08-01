@@ -10,7 +10,7 @@ TOKEN = os.getenv("BOT_TOKEN")  # токен Telegram
 PRODAMUS_SECRET = os.getenv("PRODAMUS_SECRET")  # секретный ключ Prodamus
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953  # ID канала
-PRICE = 890  # цена ₽
+PRICE = 15  # цена ₽
 ACCESS_DAYS = 1  # дней доступа
 
 bot = telebot.TeleBot(TOKEN)
