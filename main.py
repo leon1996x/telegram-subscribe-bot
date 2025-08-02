@@ -51,30 +51,43 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 
-# === Prodamus Webhook ===
-@app.post("/webhook/prodamus")
+# === Prodamus Webhook (фикс 404 и поддержка JSON) ===
+@app.post("/webhook")
 async def prodamus_webhook(request: Request):
-    form = await request.form()
-    data = dict(form)
-    signature = request.headers.get("Sign")
-
-    if not verify_signature(data, signature):
-        return {"status": "invalid signature"}
-
-    user_id = int(data.get("order_id"))
-
-    # Добавляем доступ
     try:
-        bot.unban_chat_member(CHANNEL_ID, user_id)
-        invite_link = bot.create_chat_invite_link(CHANNEL_ID, expire_date=None).invite_link
-        bot.send_message(user_id, f"Оплата успешна! Вот ссылка: {invite_link}")
-    except Exception:
-        bot.send_message(user_id, "Оплата прошла, но не удалось добавить — напишите админу.")
+        # Пробуем JSON
+        try:
+            data = await request.json()
+        except:
+            # Если не JSON — пробуем form-data
+            form = await request.form()
+            data = dict(form)
 
-    # Сохраняем дату окончания подписки
-    active_users[user_id] = datetime.now() + timedelta(days=ACCESS_DAYS)
+        signature = request.headers.get("Sign")
 
-    return {"status": "success"}
+        # Проверяем подпись, если задан секрет
+        if PRODAMUS_SECRET and signature:
+            if not verify_signature(data, signature.replace("Sign: ", "")):
+                return {"status": "invalid signature"}
+
+        # user_id из order_id или customer_extra
+        user_id = int(data.get("order_id") or data.get("customer_extra").split()[-1])
+
+        # Добавляем доступ
+        try:
+            bot.unban_chat_member(CHANNEL_ID, user_id)
+            invite_link = bot.create_chat_invite_link(CHANNEL_ID, expire_date=None).invite_link
+            bot.send_message(user_id, f"Оплата успешна! Вот ссылка: {invite_link}")
+        except Exception:
+            bot.send_message(user_id, "Оплата прошла, но не удалось добавить — напишите админу.")
+
+        # Сохраняем дату окончания подписки
+        active_users[user_id] = datetime.now() + timedelta(days=ACCESS_DAYS)
+
+        return {"status": "success"}
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 # === Команда /start ===
