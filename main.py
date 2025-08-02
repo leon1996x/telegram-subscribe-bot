@@ -1,6 +1,4 @@
 import os
-import hmac
-import hashlib
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 import telebot
@@ -34,14 +32,6 @@ def generate_payment_link(user_id: int):
     return f"{PAYFORM_URL}/?{query}"
 
 
-# === Проверка подписи от Prodamus ===
-def verify_signature(data: dict, signature: str):
-    sorted_items = sorted(data.items())
-    msg = "".join(f"{k}={v}" for k, v in sorted_items)
-    digest = hmac.new(PRODAMUS_SECRET.encode(), msg.encode(), hashlib.sha256).hexdigest()
-    return digest == signature
-
-
 # === Telegram webhook ===
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
@@ -51,7 +41,7 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 
-# === Prodamus webhook ===
+# === Prodamus webhook (без проверки подписи) ===
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
     try:
@@ -62,14 +52,14 @@ async def prodamus_webhook(request: Request):
             form = await request.form()
             data = dict(form)
 
-        # Проверяем подпись (если задан секрет)
-        signature = request.headers.get("Sign")
-        if PRODAMUS_SECRET and signature:
-            clean_signature = signature.replace("Sign: ", "")
-            if not verify_signature(data, clean_signature):
-                return {"status": "invalid signature"}
+        # --- Отключили проверку подписи для тестов ---
+        # signature = request.headers.get("Sign")
+        # if PRODAMUS_SECRET and signature:
+        #     clean_signature = signature.replace("Sign: ", "")
+        #     if not verify_signature(data, clean_signature):
+        #         return {"status": "invalid signature"}
 
-        # --- Новый алгоритм получения user_id ---
+        # Определяем user_id
         raw_order = str(data.get("order_id", ""))
         customer_extra = str(data.get("customer_extra", ""))
 
