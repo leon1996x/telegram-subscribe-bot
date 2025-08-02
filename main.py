@@ -16,11 +16,11 @@ ACCESS_DAYS = 1  # дней доступа
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
 
-# Память активных пользователей (в проде — БД/Redis)
+# Хранилище активных пользователей (в проде — БД/Redis)
 active_users = {}
 
 
-# === Функция для ссылки оплаты ===
+# === Генерация ссылки на оплату ===
 def generate_payment_link(user_id):
     params = {
         "do": "pay",
@@ -42,7 +42,7 @@ def verify_signature(data: dict, signature: str):
     return digest == signature
 
 
-# === Telegram Webhook ===
+# === Telegram webhook ===
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     json_data = await request.json()
@@ -51,33 +51,36 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 
-# === Prodamus Webhook (фикс 404 и поддержка JSON) ===
+# === Prodamus webhook (фикс 404 + поддержка JSON и form-data) ===
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
     try:
-        # Пробуем JSON
+        # Пытаемся прочитать JSON, иначе form-data
         try:
             data = await request.json()
         except:
-            # Если не JSON — пробуем form-data
             form = await request.form()
             data = dict(form)
 
+        # Проверка подписи
         signature = request.headers.get("Sign")
-
-        # Проверяем подпись, если задан секрет
         if PRODAMUS_SECRET and signature:
-            if not verify_signature(data, signature.replace("Sign: ", "")):
+            clean_signature = signature.replace("Sign: ", "")
+            if not verify_signature(data, clean_signature):
                 return {"status": "invalid signature"}
 
-        # user_id из order_id или customer_extra
+        # user_id из order_id или из customer_extra
         user_id = int(data.get("order_id") or data.get("customer_extra").split()[-1])
 
-        # Добавляем доступ
+        # Создаем ссылку-приглашение с лимитом 1 использование
         try:
             bot.unban_chat_member(CHANNEL_ID, user_id)
-            invite_link = bot.create_chat_invite_link(CHANNEL_ID, expire_date=None).invite_link
-            bot.send_message(user_id, f"Оплата успешна! Вот ссылка: {invite_link}")
+            invite = bot.create_chat_invite_link(
+                chat_id=CHANNEL_ID,
+                expire_date=None,
+                member_limit=1  # Одноразовая ссылка
+            )
+            bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
         except Exception:
             bot.send_message(user_id, "Оплата прошла, но не удалось добавить — напишите админу.")
 
