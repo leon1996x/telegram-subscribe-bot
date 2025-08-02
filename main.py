@@ -1,14 +1,18 @@
 import os
+import asyncio
+import json
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 import telebot
+import threading
 
 # === CONFIG ===
-TOKEN = os.getenv("BOT_TOKEN")  # токен Telegram
+TOKEN = os.getenv("BOT_TOKEN")
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
-CHANNEL_ID = -1002681575953  # ID канала
-PRICE = 50  # цена ₽
-ACCESS_DAYS = 1  # дней доступа
+CHANNEL_ID = -1002681575953
+PRICE = 50
+ACCESS_DAYS = 1
+USERS_FILE = "users.json"  # файл для хранения подписок
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
@@ -16,17 +20,50 @@ app = FastAPI()
 # Хранилище активных пользователей
 active_users = {}
 
+# === Загрузка/сохранение данных ===
+def load_users():
+    global active_users
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r") as f:
+                data = json.load(f)
+                # конвертация строк обратно в datetime
+                active_users = {int(uid): datetime.fromisoformat(ts) for uid, ts in data.items()}
+        except:
+            active_users = {}
+
+def save_users():
+    with open(USERS_FILE, "w") as f:
+        json.dump({uid: ts.isoformat() for uid, ts in active_users.items()}, f)
+
+# === Фоновая проверка окончания подписки ===
+def subscription_watcher():
+    while True:
+        now = datetime.now()
+        expired_users = [uid for uid, expiry in active_users.items() if now >= expiry]
+        for uid in expired_users:
+            try:
+                bot.ban_chat_member(CHANNEL_ID, uid)  # кик
+                bot.unban_chat_member(CHANNEL_ID, uid)  # анбан
+                bot.send_message(uid, "Срок подписки истёк. Чтобы продлить — оплатите снова /start.")
+            except Exception as e:
+                print(f"Ошибка при кике {uid}: {e}")
+            del active_users[uid]
+            save_users()
+        asyncio.run(asyncio.sleep(60))  # проверка каждую минуту
 
 # === Генерация ссылки на оплату ===
 def generate_payment_link(user_id: int):
-    return (
-        f"{PAYFORM_URL}/?do=pay"
-        f"&products[0][name]=Доступ в канал Меняя реальность"
-        f"&products[0][price]={PRICE}"
-        f"&products[0][quantity]=1"
-        f"&order_id={user_id}"
-        f"&customer_extra=Оплата от пользователя {user_id}"
-    )
+    params = {
+        "do": "pay",
+        "products[0][name]": "Доступ в канал Меняя реальность",
+        "products[0][price]": PRICE,
+        "products[0][quantity]": 1,
+        "order_id": str(user_id),
+        "customer_extra": f"Оплата от пользователя {user_id}"
+    }
+    query = "&".join([f"{k}={v}" for k, v in params.items()])
+    return f"{PAYFORM_URL}/?{query}"
 
 
 # === Telegram webhook ===
@@ -38,7 +75,7 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 
-# === Prodamus webhook (без проверки подписи) ===
+# === Prodamus webhook ===
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
     try:
@@ -49,13 +86,16 @@ async def prodamus_webhook(request: Request):
             form = await request.form()
             data = dict(form)
 
-        # --- user_id строго из customer_extra ---
+        # Определяем user_id
+        raw_order = str(data.get("order_id", ""))
         customer_extra = str(data.get("customer_extra", ""))
 
-        if "пользователя" in customer_extra:
+        if raw_order.isdigit() and len(raw_order) > 9:
+            user_id = int(raw_order)
+        elif "пользователя" in customer_extra:
             user_id = int(customer_extra.split()[-1])
         else:
-            return {"status": "error", "message": f"Не удалось определить user_id. customer_extra={customer_extra}"}
+            return {"status": "error", "message": "Не удалось определить user_id"}
 
         # Создаём одноразовую ссылку
         bot.unban_chat_member(CHANNEL_ID, user_id)
@@ -68,6 +108,7 @@ async def prodamus_webhook(request: Request):
 
         # Сохраняем дату окончания подписки
         active_users[user_id] = datetime.now() + timedelta(days=ACCESS_DAYS)
+        save_users()
 
         return {"status": "success"}
 
@@ -96,3 +137,8 @@ def start(message):
 @app.get("/")
 async def home():
     return {"status": "Bot is running!"}
+
+
+# === Запуск при старте приложения ===
+load_users()  # восстановление пользователей
+threading.Thread(target=subscription_watcher, daemon=True).start()
