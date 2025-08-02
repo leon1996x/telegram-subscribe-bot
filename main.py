@@ -5,7 +5,6 @@ import telebot
 
 # === CONFIG ===
 TOKEN = os.getenv("BOT_TOKEN")  # токен Telegram
-PRODAMUS_SECRET = os.getenv("PRODAMUS_SECRET")  # секретный ключ Prodamus
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953  # ID канала
 PRICE = 50  # цена ₽
@@ -20,16 +19,14 @@ active_users = {}
 
 # === Генерация ссылки на оплату ===
 def generate_payment_link(user_id: int):
-    params = {
-        "do": "pay",
-        "products[0][name]": "Доступ в канал Меняя реальность",
-        "products[0][price]": PRICE,
-        "products[0][quantity]": 1,
-        "order_id": str(user_id),
-        "customer_extra": f"Оплата от пользователя {user_id}"
-    }
-    query = "&".join([f"{k}={v}" for k, v in params.items()])
-    return f"{PAYFORM_URL}/?{query}"
+    return (
+        f"{PAYFORM_URL}/?do=pay"
+        f"&products[0][name]=Доступ в канал Меняя реальность"
+        f"&products[0][price]={PRICE}"
+        f"&products[0][quantity]=1"
+        f"&order_id={user_id}"
+        f"&customer_extra=Оплата от пользователя {user_id}"
+    )
 
 
 # === Telegram webhook ===
@@ -52,23 +49,13 @@ async def prodamus_webhook(request: Request):
             form = await request.form()
             data = dict(form)
 
-        # --- Отключили проверку подписи для тестов ---
-        # signature = request.headers.get("Sign")
-        # if PRODAMUS_SECRET and signature:
-        #     clean_signature = signature.replace("Sign: ", "")
-        #     if not verify_signature(data, clean_signature):
-        #         return {"status": "invalid signature"}
-
-        # Определяем user_id
-        raw_order = str(data.get("order_id", ""))
+        # --- user_id строго из customer_extra ---
         customer_extra = str(data.get("customer_extra", ""))
 
-        if raw_order.isdigit() and len(raw_order) > 9:
-            user_id = int(raw_order)
-        elif "пользователя" in customer_extra:
+        if "пользователя" in customer_extra:
             user_id = int(customer_extra.split()[-1])
         else:
-            return {"status": "error", "message": "Не удалось определить user_id"}
+            return {"status": "error", "message": f"Не удалось определить user_id. customer_extra={customer_extra}"}
 
         # Создаём одноразовую ссылку
         bot.unban_chat_member(CHANNEL_ID, user_id)
