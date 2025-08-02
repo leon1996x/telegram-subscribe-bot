@@ -21,13 +21,16 @@ active_users = {}
 
 
 # === Генерация ссылки на оплату ===
-def generate_payment_link(user_id):
+def generate_payment_link(user_id: int):
+    """
+    Создаёт ссылку оплаты с order_id = Telegram user_id
+    """
     params = {
         "do": "pay",
         "products[0][name]": "Доступ в канал Меняя реальность",
         "products[0][price]": PRICE,
         "products[0][quantity]": 1,
-        "order_id": str(user_id),
+        "order_id": str(user_id),  # <-- жёстко передаём Telegram ID
         "customer_extra": f"Оплата от пользователя {user_id}"
     }
     query = "&".join([f"{k}={v}" for k, v in params.items()])
@@ -51,9 +54,12 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 
-# === Prodamus webhook (фикс 404 + поддержка JSON и form-data) ===
+# === Prodamus webhook ===
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
+    """
+    Обрабатывает уведомление от Prodamus
+    """
     try:
         # Пытаемся прочитать JSON, иначе form-data
         try:
@@ -62,27 +68,26 @@ async def prodamus_webhook(request: Request):
             form = await request.form()
             data = dict(form)
 
-        # Проверка подписи
+        # Проверка подписи (если задан секрет)
         signature = request.headers.get("Sign")
         if PRODAMUS_SECRET and signature:
             clean_signature = signature.replace("Sign: ", "")
             if not verify_signature(data, clean_signature):
                 return {"status": "invalid signature"}
 
-        # user_id из order_id или из customer_extra
-        user_id = int(data.get("order_id") or data.get("customer_extra").split()[-1])
+        # Берём user_id строго из order_id
+        if not data.get("order_id"):
+            return {"status": "error", "message": "order_id отсутствует"}
+        user_id = int(data["order_id"])
 
-        # Создаем ссылку-приглашение с лимитом 1 использование
-        try:
-            bot.unban_chat_member(CHANNEL_ID, user_id)
-            invite = bot.create_chat_invite_link(
-                chat_id=CHANNEL_ID,
-                expire_date=None,
-                member_limit=1  # Одноразовая ссылка
-            )
-            bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
-        except Exception:
-            bot.send_message(user_id, "Оплата прошла, но не удалось добавить — напишите админу.")
+        # Создаём одноразовую ссылку
+        bot.unban_chat_member(CHANNEL_ID, user_id)
+        invite = bot.create_chat_invite_link(
+            chat_id=CHANNEL_ID,
+            expire_date=None,
+            member_limit=1
+        )
+        bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
 
         # Сохраняем дату окончания подписки
         active_users[user_id] = datetime.now() + timedelta(days=ACCESS_DAYS)
@@ -96,13 +101,21 @@ async def prodamus_webhook(request: Request):
 # === Команда /start ===
 @bot.message_handler(commands=["start"])
 def start(message):
+    """
+    Показывает кнопку оплаты
+    """
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(
         telebot.types.InlineKeyboardButton(
             f"Оплатить {PRICE}₽ / месяц", url=generate_payment_link(message.from_user.id)
         )
     )
-    bot.send_message(message.chat.id, "Привет! Оплати подписку, чтобы попасть в канал:", reply_markup=markup)
+    bot.send_message(
+        message.chat.id,
+        f"Привет! Оплати подписку {PRICE}₽, чтобы попасть в канал.\n"
+        f"Твой ID: {message.from_user.id}",  # покажем ID для отладки
+        reply_markup=markup
+    )
 
 
 # === Корневой эндпоинт ===
