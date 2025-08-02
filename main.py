@@ -16,21 +16,18 @@ ACCESS_DAYS = 1  # дней доступа
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
 
-# Хранилище активных пользователей (в проде — БД/Redis)
+# Хранилище активных пользователей
 active_users = {}
 
 
 # === Генерация ссылки на оплату ===
 def generate_payment_link(user_id: int):
-    """
-    Создаёт ссылку оплаты с order_id = Telegram user_id
-    """
     params = {
         "do": "pay",
         "products[0][name]": "Доступ в канал Меняя реальность",
         "products[0][price]": PRICE,
         "products[0][quantity]": 1,
-        "order_id": str(user_id),  # <-- жёстко передаём Telegram ID
+        "order_id": str(user_id),
         "customer_extra": f"Оплата от пользователя {user_id}"
     }
     query = "&".join([f"{k}={v}" for k, v in params.items()])
@@ -57,28 +54,31 @@ async def telegram_webhook(request: Request):
 # === Prodamus webhook ===
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
-    """
-    Обрабатывает уведомление от Prodamus
-    """
     try:
-        # Пытаемся прочитать JSON, иначе form-data
+        # Читаем JSON или form-data
         try:
             data = await request.json()
         except:
             form = await request.form()
             data = dict(form)
 
-        # Проверка подписи (если задан секрет)
+        # Проверяем подпись (если задан секрет)
         signature = request.headers.get("Sign")
         if PRODAMUS_SECRET and signature:
             clean_signature = signature.replace("Sign: ", "")
             if not verify_signature(data, clean_signature):
                 return {"status": "invalid signature"}
 
-        # Берём user_id строго из order_id
-        if not data.get("order_id"):
-            return {"status": "error", "message": "order_id отсутствует"}
-        user_id = int(data["order_id"])
+        # --- Новый алгоритм получения user_id ---
+        raw_order = str(data.get("order_id", ""))
+        customer_extra = str(data.get("customer_extra", ""))
+
+        if raw_order.isdigit() and len(raw_order) > 9:
+            user_id = int(raw_order)
+        elif "пользователя" in customer_extra:
+            user_id = int(customer_extra.split()[-1])
+        else:
+            return {"status": "error", "message": "Не удалось определить user_id"}
 
         # Создаём одноразовую ссылку
         bot.unban_chat_member(CHANNEL_ID, user_id)
@@ -101,9 +101,6 @@ async def prodamus_webhook(request: Request):
 # === Команда /start ===
 @bot.message_handler(commands=["start"])
 def start(message):
-    """
-    Показывает кнопку оплаты
-    """
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(
         telebot.types.InlineKeyboardButton(
@@ -113,7 +110,7 @@ def start(message):
     bot.send_message(
         message.chat.id,
         f"Привет! Оплати подписку {PRICE}₽, чтобы попасть в канал.\n"
-        f"Твой ID: {message.from_user.id}",  # покажем ID для отладки
+        f"Твой ID: {message.from_user.id}",
         reply_markup=markup
     )
 
