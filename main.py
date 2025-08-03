@@ -1,10 +1,10 @@
 import os
-import asyncio
 import json
+import threading
+import time
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 import telebot
-import threading
 
 # === CONFIG ===
 TOKEN = os.getenv("BOT_TOKEN")
@@ -12,7 +12,10 @@ PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953
 PRICE = 50
 ACCESS_DAYS = 1
-USERS_FILE = "users.json"  # файл для хранения подписок
+USERS_FILE = "users.json"
+
+# Укажи сюда свой Telegram ID
+ADMIN_ID = 7145469393   # <-- твой ID
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
@@ -27,7 +30,6 @@ def load_users():
         try:
             with open(USERS_FILE, "r") as f:
                 data = json.load(f)
-                # конвертация строк обратно в datetime
                 active_users = {int(uid): datetime.fromisoformat(ts) for uid, ts in data.items()}
         except:
             active_users = {}
@@ -41,16 +43,21 @@ def subscription_watcher():
     while True:
         now = datetime.now()
         expired_users = [uid for uid, expiry in active_users.items() if now >= expiry]
+
         for uid in expired_users:
             try:
-                bot.ban_chat_member(CHANNEL_ID, uid)  # кик
-                bot.unban_chat_member(CHANNEL_ID, uid)  # анбан
+                bot.ban_chat_member(CHANNEL_ID, uid)   # кик
+                bot.unban_chat_member(CHANNEL_ID, uid) # анбан
                 bot.send_message(uid, "Срок подписки истёк. Чтобы продлить — оплатите снова /start.")
+                
+                # Сообщение админу
+                bot.send_message(ADMIN_ID, f"Пользователь {uid} удалён из канала — подписка истекла.")
             except Exception as e:
-                print(f"Ошибка при кике {uid}: {e}")
+                bot.send_message(ADMIN_ID, f"Ошибка при кике {uid}: {e}")
             del active_users[uid]
             save_users()
-        asyncio.run(asyncio.sleep(60))  # проверка каждую минуту
+
+        time.sleep(60)  # проверяем каждую минуту
 
 # === Генерация ссылки на оплату ===
 def generate_payment_link(user_id: int):
@@ -65,7 +72,6 @@ def generate_payment_link(user_id: int):
     query = "&".join([f"{k}={v}" for k, v in params.items()])
     return f"{PAYFORM_URL}/?{query}"
 
-
 # === Telegram webhook ===
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
@@ -73,7 +79,6 @@ async def telegram_webhook(request: Request):
     update = telebot.types.Update.de_json(json_data)
     bot.process_new_updates([update])
     return {"ok": True}
-
 
 # === Prodamus webhook ===
 @app.post("/webhook")
@@ -115,7 +120,6 @@ async def prodamus_webhook(request: Request):
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 # === Команда /start ===
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -132,13 +136,11 @@ def start(message):
         reply_markup=markup
     )
 
-
 # === Корневой эндпоинт ===
 @app.get("/")
 async def home():
     return {"status": "Bot is running!"}
 
-
 # === Запуск при старте приложения ===
-load_users()  # восстановление пользователей
+load_users()
 threading.Thread(target=subscription_watcher, daemon=True).start()
