@@ -7,22 +7,21 @@ from fastapi import FastAPI, Request
 import telebot
 
 # === CONFIG ===
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")  # токен бота
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953
 PRICE = 50
-ACCESS_MINUTES = 10  # тестовая подписка 10 мин
+ACCESS_MINUTES = 10  # тестовая подписка
 USERS_FILE = "users.json"
-
-ADMIN_ID = 513148972
+ADMIN_ID = 513148972  # твой ID
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
 
-# Хранилище активных пользователей
+# Хранилище подписок
 active_users = {}
 
-# === Загрузка/сохранение данных ===
+# === Загрузка и сохранение пользователей ===
 def load_users():
     global active_users
     if os.path.exists(USERS_FILE):
@@ -43,24 +42,23 @@ def check_expired():
     expired_users = [uid for uid, expiry in active_users.items() if now >= expiry]
 
     if expired_users:
-        print(f"[CHECK] Найдены истёкшие: {expired_users}")
+        print(f"[CHECK] Истёкшие подписки: {expired_users}")
 
     for uid in expired_users:
         try:
-            print(f"[CHECK] Кикаю {uid}")
             bot.ban_chat_member(CHANNEL_ID, uid)   # кик
             bot.unban_chat_member(CHANNEL_ID, uid) # анбан
             bot.send_message(uid, "Срок подписки истёк. Чтобы продлить — оплатите снова /start.")
-            bot.send_message(ADMIN_ID, f"Пользователь {uid} удалён из канала — подписка истекла.")
+            bot.send_message(ADMIN_ID, f"Пользователь {uid} удалён из канала (подписка истекла).")
         except Exception as e:
             print(f"[CHECK] Ошибка при кике {uid}: {e}")
             bot.send_message(ADMIN_ID, f"Ошибка при кике {uid}: {e}")
         del active_users[uid]
         save_users()
 
-# === Фоновый цикл проверки ===
+# === Фоновый мониторинг ===
 def subscription_watcher():
-    print("[WATCHER] Запущен фоновый мониторинг")
+    print("[WATCHER] Мониторинг запущен")
     while True:
         check_expired()
         time.sleep(60)  # проверяем раз в минуту
@@ -97,15 +95,17 @@ async def prodamus_webhook(request: Request):
             form = await request.form()
             data = dict(form)
 
-        # Определяем user_id
-        raw_order = str(data.get("order_id", ""))
+        # Логируем входящие данные
+        print(f"[WEBHOOK] Пришло: {data}")
+        bot.send_message(ADMIN_ID, f"[WEBHOOK] Пришло: {data}")
+
+        # Достаём user_id из customer_extra
         customer_extra = str(data.get("customer_extra", ""))
 
-        if raw_order.isdigit() and len(raw_order) > 9:
-            user_id = int(raw_order)
-        elif "пользователя" in customer_extra:
+        if "пользователя" in customer_extra:
             user_id = int(customer_extra.split()[-1])
         else:
+            bot.send_message(ADMIN_ID, f"[WEBHOOK] Не удалось определить ID: {data}")
             return {"status": "error", "message": "Не удалось определить user_id"}
 
         # Создаём одноразовую ссылку
@@ -117,13 +117,14 @@ async def prodamus_webhook(request: Request):
         )
         bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
 
-        # Сохраняем дату окончания подписки
+        # Сохраняем срок подписки (10 мин)
         active_users[user_id] = datetime.now() + timedelta(minutes=ACCESS_MINUTES)
         save_users()
 
         return {"status": "success"}
 
     except Exception as e:
+        bot.send_message(ADMIN_ID, f"[WEBHOOK] Ошибка: {e}")
         return {"status": "error", "message": str(e)}
 
 # === Команда /start ===
@@ -147,6 +148,6 @@ def start(message):
 async def home():
     return {"status": "Bot is running!"}
 
-# === Запуск при старте приложения ===
+# === Запуск при старте ===
 load_users()
 threading.Thread(target=subscription_watcher, daemon=True).start()
