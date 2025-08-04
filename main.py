@@ -11,8 +11,8 @@ import telebot
 TOKEN = os.getenv("BOT_TOKEN")  # токен бота
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953      # ID твоего канала
-PRICE = 50                       # цена
-ACCESS_MINUTES = 10              # 10 мин для теста (заменишь на 1440 для суток)
+PRICE = 890                      # цена
+ACCESS_DAYS = 30                 # 30 дней доступа
 USERS_FILE = "users.json"
 
 ADMIN_ID = 513148972             # твой Telegram ID
@@ -128,8 +128,8 @@ async def prodamus_webhook(request: Request):
         bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
         bot.send_message(ADMIN_ID, f"Оплатил пользователь {user_id}. Ссылка выдана.")
 
-        # Сохраняем дату окончания подписки
-        active_users[user_id] = datetime.now() + timedelta(minutes=ACCESS_MINUTES)
+        # Сохраняем дату окончания подписки (30 дней)
+        active_users[user_id] = datetime.now() + timedelta(days=ACCESS_DAYS)
         save_users()
 
         return {"status": "success"}
