@@ -3,18 +3,19 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta
+from urllib.parse import unquote
 from fastapi import FastAPI, Request
 import telebot
 
 # === CONFIG ===
-TOKEN = os.getenv("BOT_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")  # токен бота
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
-CHANNEL_ID = -1002681575953
-PRICE = 50
-ACCESS_MINUTES = 10  # тестовая подписка 10 мин
+CHANNEL_ID = -1002681575953      # ID твоего канала
+PRICE = 50                       # цена
+ACCESS_MINUTES = 10              # 10 мин для теста (заменишь на 1440 для суток)
 USERS_FILE = "users.json"
 
-ADMIN_ID = 513148972  # твой ID
+ADMIN_ID = 513148972             # твой Telegram ID
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
@@ -22,25 +23,8 @@ app = FastAPI()
 # Хранилище активных пользователей
 active_users = {}
 
-# === Устойчивая отправка сообщений ===
-def send_safe(chat_id: int, text: str):
-    """Отправка сообщения с 3 попытками и логом ошибок"""
-    for attempt in range(3):
-        try:
-            bot.send_message(chat_id, text)
-            return True
-        except Exception as e:
-            print(f"[send_safe] Ошибка при отправке ({attempt+1}/3): {e}")
-            time.sleep(2)
-    # Если все попытки не удались — уведомляем админа
-    if chat_id != ADMIN_ID:
-        try:
-            bot.send_message(ADMIN_ID, f"[ALERT] Не удалось отправить сообщение пользователю {chat_id}. Ошибка: {e}")
-        except:
-            pass
-    return False
 
-# === Загрузка/сохранение данных ===
+# === Загрузка/сохранение пользователей ===
 def load_users():
     global active_users
     if os.path.exists(USERS_FILE):
@@ -55,33 +39,33 @@ def save_users():
     with open(USERS_FILE, "w") as f:
         json.dump({uid: ts.isoformat() for uid, ts in active_users.items()}, f)
 
-# === Проверка истёкших подписок ===
+
+# === Проверка и удаление просроченных подписок ===
 def check_expired():
     now = datetime.now()
     expired_users = [uid for uid, expiry in active_users.items() if now >= expiry]
 
-    if expired_users:
-        print(f"[CHECK] Найдены истёкшие: {expired_users}")
-
     for uid in expired_users:
         try:
             print(f"[CHECK] Кикаю {uid}")
-            bot.ban_chat_member(CHANNEL_ID, uid)   # кик
-            bot.unban_chat_member(CHANNEL_ID, uid) # анбан
-            send_safe(uid, "Срок подписки истёк. Чтобы продлить — оплатите снова /start.")
-            send_safe(ADMIN_ID, f"Пользователь {uid} удалён из канала — подписка истекла.")
+            bot.ban_chat_member(CHANNEL_ID, uid)    # кик
+            bot.unban_chat_member(CHANNEL_ID, uid)  # анбан
+            bot.send_message(uid, "Срок подписки истёк. Чтобы продлить — оплатите снова /start.")
+            bot.send_message(ADMIN_ID, f"Пользователь {uid} удалён из канала — подписка истекла.")
         except Exception as e:
             print(f"[CHECK] Ошибка при кике {uid}: {e}")
-            send_safe(ADMIN_ID, f"Ошибка при кике {uid}: {e}")
+            bot.send_message(ADMIN_ID, f"Ошибка при кике {uid}: {e}")
         del active_users[uid]
         save_users()
 
-# === Фоновый цикл проверки ===
+
+# === Фоновая проверка каждую минуту ===
 def subscription_watcher():
-    print("[WATCHER] Запущен фоновый мониторинг")
+    print("[WATCHER] Запущен мониторинг подписок")
     while True:
         check_expired()
-        time.sleep(60)  # проверяем раз в минуту
+        time.sleep(60)  # проверка раз в минуту
+
 
 # === Генерация ссылки на оплату ===
 def generate_payment_link(user_id: int):
@@ -96,17 +80,21 @@ def generate_payment_link(user_id: int):
     query = "&".join([f"{k}={v}" for k, v in params.items()])
     return f"{PAYFORM_URL}/?{query}"
 
+
 # === Telegram webhook ===
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
+    check_expired()  # проверка на каждом апдейте
     json_data = await request.json()
     update = telebot.types.Update.de_json(json_data)
     bot.process_new_updates([update])
     return {"ok": True}
 
+
 # === Prodamus webhook ===
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
+    check_expired()  # проверка на каждом апдейте
     try:
         # Читаем JSON или form-data
         try:
@@ -115,15 +103,17 @@ async def prodamus_webhook(request: Request):
             form = await request.form()
             data = dict(form)
 
-        # Определяем user_id
+        # Декодируем customer_extra (убираем %20)
         raw_order = str(data.get("order_id", ""))
-        customer_extra = str(data.get("customer_extra", ""))
+        customer_extra = unquote(str(data.get("customer_extra", "")))
 
+        # Определяем user_id
         if raw_order.isdigit() and len(raw_order) > 9:
             user_id = int(raw_order)
         elif "пользователя" in customer_extra:
             user_id = int(customer_extra.split()[-1])
         else:
+            bot.send_message(ADMIN_ID, f"[ALERT] Не удалось определить user_id: {data}")
             return {"status": "error", "message": "Не удалось определить user_id"}
 
         # Создаём одноразовую ссылку
@@ -133,7 +123,10 @@ async def prodamus_webhook(request: Request):
             expire_date=None,
             member_limit=1
         )
-        send_safe(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
+
+        # Отправляем пользователю
+        bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
+        bot.send_message(ADMIN_ID, f"Оплатил пользователь {user_id}. Ссылка выдана.")
 
         # Сохраняем дату окончания подписки
         active_users[user_id] = datetime.now() + timedelta(minutes=ACCESS_MINUTES)
@@ -142,8 +135,9 @@ async def prodamus_webhook(request: Request):
         return {"status": "success"}
 
     except Exception as e:
-        send_safe(ADMIN_ID, f"[ALERT] Ошибка вебхука: {e}")
+        bot.send_message(ADMIN_ID, f"[ALERT] Ошибка вебхука: {e}")
         return {"status": "error", "message": str(e)}
+
 
 # === Команда /start ===
 @bot.message_handler(commands=["start"])
@@ -154,17 +148,20 @@ def start(message):
             f"Оплатить {PRICE}₽ / месяц", url=generate_payment_link(message.from_user.id)
         )
     )
-    send_safe(
+    bot.send_message(
         message.chat.id,
         f"Привет! Оплати подписку {PRICE}₽, чтобы попасть в канал.\n"
-        f"Твой ID: {message.from_user.id}"
+        f"Твой ID: {message.from_user.id}",
+        reply_markup=markup
     )
-    bot.send_message(message.chat.id, "Нажми кнопку ниже для оплаты:", reply_markup=markup)
 
-# === Корневой эндпоинт ===
+
+# === Корневой эндпоинт (проверка пингера) ===
 @app.get("/")
 async def home():
+    check_expired()
     return {"status": "Bot is running!"}
+
 
 # === Запуск при старте приложения ===
 load_users()
