@@ -1,5 +1,7 @@
 import os
 import json
+import threading
+import time
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 import telebot
@@ -9,10 +11,10 @@ TOKEN = os.getenv("BOT_TOKEN")
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953
 PRICE = 50
-ACCESS_MINUTES = 10   # тестовая подписка на 10 минут
+ACCESS_MINUTES = 10  # тестовая подписка 10 мин
 USERS_FILE = "users.json"
 
-ADMIN_ID = 7145469393   # твой ID
+ADMIN_ID = 7145469393
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
@@ -35,21 +37,33 @@ def save_users():
     with open(USERS_FILE, "w") as f:
         json.dump({uid: ts.isoformat() for uid, ts in active_users.items()}, f)
 
-# === Проверка и кик просроченных ===
+# === Проверка истёкших подписок ===
 def check_expired():
     now = datetime.now()
     expired_users = [uid for uid, expiry in active_users.items() if now >= expiry]
 
+    if expired_users:
+        print(f"[CHECK] Найдены истёкшие: {expired_users}")
+
     for uid in expired_users:
         try:
+            print(f"[CHECK] Кикаю {uid}")
             bot.ban_chat_member(CHANNEL_ID, uid)   # кик
             bot.unban_chat_member(CHANNEL_ID, uid) # анбан
             bot.send_message(uid, "Срок подписки истёк. Чтобы продлить — оплатите снова /start.")
             bot.send_message(ADMIN_ID, f"Пользователь {uid} удалён из канала — подписка истекла.")
         except Exception as e:
+            print(f"[CHECK] Ошибка при кике {uid}: {e}")
             bot.send_message(ADMIN_ID, f"Ошибка при кике {uid}: {e}")
         del active_users[uid]
         save_users()
+
+# === Фоновый цикл проверки ===
+def subscription_watcher():
+    print("[WATCHER] Запущен фоновый мониторинг")
+    while True:
+        check_expired()
+        time.sleep(60)  # проверяем раз в минуту
 
 # === Генерация ссылки на оплату ===
 def generate_payment_link(user_id: int):
@@ -67,7 +81,6 @@ def generate_payment_link(user_id: int):
 # === Telegram webhook ===
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
-    check_expired()  # проверяем при каждом запросе
     json_data = await request.json()
     update = telebot.types.Update.de_json(json_data)
     bot.process_new_updates([update])
@@ -76,7 +89,6 @@ async def telegram_webhook(request: Request):
 # === Prodamus webhook ===
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
-    check_expired()  # проверяем при каждом запросе
     try:
         # Читаем JSON или form-data
         try:
@@ -105,7 +117,7 @@ async def prodamus_webhook(request: Request):
         )
         bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
 
-        # Сохраняем дату окончания подписки (10 минут)
+        # Сохраняем дату окончания подписки
         active_users[user_id] = datetime.now() + timedelta(minutes=ACCESS_MINUTES)
         save_users()
 
@@ -133,8 +145,8 @@ def start(message):
 # === Корневой эндпоинт ===
 @app.get("/")
 async def home():
-    check_expired()  # тоже проверяем
     return {"status": "Bot is running!"}
 
 # === Запуск при старте приложения ===
 load_users()
+threading.Thread(target=subscription_watcher, daemon=True).start()
