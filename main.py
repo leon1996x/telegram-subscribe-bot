@@ -14,7 +14,7 @@ PRICE = 50
 ACCESS_MINUTES = 10  # тестовая подписка 10 мин
 USERS_FILE = "users.json"
 
-ADMIN_ID = 7145469393
+ADMIN_ID = 513148972
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
