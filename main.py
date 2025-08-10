@@ -1,7 +1,9 @@
 import os
 import json
+import threading
+import time
 from datetime import datetime
-from urllib.parse import unquote
+from urllib.parse import urlencode, unquote
 from fastapi import FastAPI, Request
 import telebot
 
@@ -9,29 +11,32 @@ import telebot
 TOKEN = os.getenv("BOT_TOKEN")  # токен бота
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953      # ID твоего канала
-PRICE = 1590                     # цена (навсегда)
-ADMIN_ID = 513148972              # твой Telegram ID
+PRICE = 1590                     # цена
+USERS_FILE = "users.json"
+ADMIN_ID = 513148972             # твой Telegram ID
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
 
-# Хранилище пользователей (кто оплатил)
-USERS_FILE = "users.json"
-paid_users = set()
+# Хранилище пользователей
+active_users = {}
 
-# === Загрузка пользователей ===
+
+# === Загрузка/сохранение пользователей ===
 def load_users():
-    global paid_users
+    global active_users
     if os.path.exists(USERS_FILE):
         try:
             with open(USERS_FILE, "r") as f:
-                paid_users = set(json.load(f))
+                data = json.load(f)
+                active_users = {int(uid): datetime.fromisoformat(ts) for uid, ts in data.items()}
         except:
-            paid_users = set()
+            active_users = {}
 
 def save_users():
     with open(USERS_FILE, "w") as f:
-        json.dump(list(paid_users), f)
+        json.dump({uid: ts.isoformat() for uid, ts in active_users.items()}, f)
+
 
 # === Генерация ссылки на оплату ===
 def generate_payment_link(user_id: int):
@@ -43,16 +48,20 @@ def generate_payment_link(user_id: int):
         "order_id": str(user_id),
         "customer_extra": f"Оплата от пользователя {user_id}"
     }
-    query = "&".join([f"{k}={v}" for k, v in params.items()])
-    return f"{PAYFORM_URL}/?{query}"
+    return f"{PAYFORM_URL}/?{urlencode(params)}"
+
 
 # === Telegram webhook ===
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
     json_data = await request.json()
     update = telebot.types.Update.de_json(json_data)
-    bot.process_new_updates([update])
+
+    # Обрабатываем апдейт в отдельном потоке, чтобы Telegram не ждал
+    threading.Thread(target=lambda: bot.process_new_updates([update])).start()
+
     return {"ok": True}
+
 
 # === Prodamus webhook ===
 @app.post("/webhook")
@@ -65,31 +74,19 @@ async def prodamus_webhook(request: Request):
             form = await request.form()
             data = dict(form)
 
-        # Декодируем
-        raw_order = str(data.get("order_id", "")).strip()
-        customer_extra = unquote(str(data.get("customer_extra", "")).strip())
+        raw_order = str(data.get("order_id", ""))
+        customer_extra = unquote(str(data.get("customer_extra", "")))
 
         # Определяем user_id
-        user_id = None
-        if raw_order.isdigit():
+        if raw_order.isdigit() and len(raw_order) > 5:
             user_id = int(raw_order)
+        elif "пользователя" in customer_extra:
+            user_id = int(customer_extra.split()[-1])
         else:
-            # Ищем цифры в customer_extra
-            import re
-            match = re.search(r"\d{5,}", customer_extra)
-            if match:
-                user_id = int(match.group(0))
-
-        if not user_id:
             bot.send_message(ADMIN_ID, f"[ALERT] Не удалось определить user_id: {data}")
-            return {"status": "error", "message": "user_id not found"}
+            return {"status": "error", "message": "Не удалось определить user_id"}
 
-        # Если уже есть в списке — не выдаём повторно
-        if user_id in paid_users:
-            bot.send_message(user_id, "Вы уже получили доступ к каналу.")
-            return {"status": "ok"}
-
-        # Снимаем бан и выдаём ссылку
+        # Создаём одноразовую ссылку
         bot.unban_chat_member(CHANNEL_ID, user_id)
         invite = bot.create_chat_invite_link(
             chat_id=CHANNEL_ID,
@@ -97,10 +94,12 @@ async def prodamus_webhook(request: Request):
             member_limit=1
         )
 
-        bot.send_message(user_id, f"✅ Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
+        # Отправляем пользователю
+        bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
         bot.send_message(ADMIN_ID, f"Оплатил пользователь {user_id}. Ссылка выдана.")
 
-        paid_users.add(user_id)
+        # Сохраняем без ограничения по времени
+        active_users[user_id] = datetime.now()
         save_users()
 
         return {"status": "success"}
@@ -109,30 +108,29 @@ async def prodamus_webhook(request: Request):
         bot.send_message(ADMIN_ID, f"[ALERT] Ошибка вебхука: {e}")
         return {"status": "error", "message": str(e)}
 
-# === /start ===
+
+# === Команда /start ===
 @bot.message_handler(commands=["start"])
 def start(message):
-    if message.from_user.id in paid_users:
-        bot.send_message(message.chat.id, "У вас уже есть доступ к каналу.")
-        return
-
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(
         telebot.types.InlineKeyboardButton(
-            f"Оплатить {PRICE}₽ (навсегда)", url=generate_payment_link(message.from_user.id)
+            f"Оплатить {PRICE}₽ (разово)", url=generate_payment_link(message.from_user.id)
         )
     )
     bot.send_message(
         message.chat.id,
-        f"Привет! Оплати {PRICE}₽, чтобы получить доступ в канал <<Меняя реальность>>.\n"
-        f"Доступ даётся навсегда.",
+        f"Привет! Оплати {PRICE}₽, чтобы попасть в канал.\n"
+        f"Твой ID: {message.from_user.id}",
         reply_markup=markup
     )
 
-# === Пингер ===
+
+# === Корневой эндпоинт ===
 @app.get("/")
 async def home():
     return {"status": "Bot is running!"}
+
 
 # === Запуск ===
 load_users()
