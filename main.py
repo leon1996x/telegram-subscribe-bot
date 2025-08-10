@@ -7,21 +7,19 @@ from fastapi import FastAPI, Request
 import telebot
 
 # === CONFIG ===
-TOKEN = os.getenv("BOT_TOKEN")  # токен бота
+TOKEN = os.getenv("BOT_TOKEN")  # токен бота из переменных окружения
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953      # ID твоего канала
-PRICE = 50                       # цена для теста
+PRICE = 50                       # цена — пожизненный доступ
 USERS_FILE = "users.json"
 ADMIN_ID = 513148972             # твой Telegram ID
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
-
-# Хранилище пользователей
 active_users = {}
 
 
-# === Загрузка/сохранение пользователей ===
+# === Загрузка / сохранение пользователей ===
 def load_users():
     global active_users
     if os.path.exists(USERS_FILE):
@@ -41,7 +39,7 @@ def save_users():
 def generate_payment_link(user_id: int):
     params = {
         "do": "pay",
-        "products[0][name]": "Оплата за гайд <<Меняя реальность>>",
+        "products[0][name]": "Оплата за гайд 'Меняя реальность'",
         "products[0][price]": PRICE,
         "products[0][quantity]": 1,
         "order_id": str(user_id),
@@ -69,19 +67,23 @@ async def prodamus_webhook(request: Request):
             form = await request.form()
             data = dict(form)
 
-        # Логируем, чтобы отследить что приходит
-        bot.send_message(ADMIN_ID, f"[WEBHOOK DATA] {data}")
-
         raw_order = str(data.get("order_id", ""))
         customer_extra = unquote(str(data.get("customer_extra", "")))
 
+        # Определяем user_id
         if raw_order.isdigit():
             user_id = int(raw_order)
         elif "пользователя" in customer_extra:
             user_id = int(customer_extra.split()[-1])
         else:
             bot.send_message(ADMIN_ID, f"[ALERT] Не удалось определить user_id: {data}")
-            return {"status": "error", "message": "Не удалось определить user_id"}
+            return {"status": "error"}
+
+        # Даем пожизненный доступ без автокика
+        try:
+            bot.unban_chat_member(CHANNEL_ID, user_id)
+        except:
+            pass  # вдруг он уже там
 
         invite = bot.create_chat_invite_link(
             chat_id=CHANNEL_ID,
@@ -89,7 +91,7 @@ async def prodamus_webhook(request: Request):
             member_limit=1
         )
 
-        bot.send_message(user_id, f"✅ Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
+        bot.send_message(user_id, f"✅ Оплата успешна!\nВот ссылка для входа в канал:\n{invite.invite_link}")
         bot.send_message(ADMIN_ID, f"💰 Оплатил пользователь {user_id}. Ссылка выдана.")
 
         active_users[user_id] = datetime.now()
@@ -102,24 +104,24 @@ async def prodamus_webhook(request: Request):
         return {"status": "error", "message": str(e)}
 
 
-# === Команда /start ===
+# === /start ===
 @bot.message_handler(commands=["start"])
 def start(message):
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(
         telebot.types.InlineKeyboardButton(
-            f"Оплатить {PRICE}₽ (разово)", url=generate_payment_link(message.from_user.id)
+            f"Оплатить {PRICE}₽ за гайд «Меняя реальность»", 
+            url=generate_payment_link(message.from_user.id)
         )
     )
     bot.send_message(
         message.chat.id,
-        f"Привет! Оплати {PRICE}₽ за гайд «Меняя реальность».\n"
-        f"Твой ID: {message.from_user.id}",
+        f"Привет! Чтобы получить доступ к гайду «Меняя реальность», оплати {PRICE}₽.",
         reply_markup=markup
     )
 
 
-# === Корневой эндпоинт ===
+# === Корень ===
 @app.get("/")
 async def home():
     return {"status": "Bot is running!"}
