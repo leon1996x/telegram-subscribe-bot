@@ -1,7 +1,6 @@
 import os
 import json
 import threading
-import time
 from datetime import datetime
 from urllib.parse import urlencode, unquote
 from fastapi import FastAPI, Request
@@ -11,7 +10,7 @@ import telebot
 TOKEN = os.getenv("BOT_TOKEN")  # токен бота
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953      # ID твоего канала
-PRICE = 1590                     # цена
+PRICE = 50                       # цена для теста
 USERS_FILE = "users.json"
 ADMIN_ID = 513148972             # твой Telegram ID
 
@@ -56,10 +55,7 @@ def generate_payment_link(user_id: int):
 async def telegram_webhook(request: Request):
     json_data = await request.json()
     update = telebot.types.Update.de_json(json_data)
-
-    # Обрабатываем апдейт в отдельном потоке, чтобы Telegram не ждал
     threading.Thread(target=lambda: bot.process_new_updates([update])).start()
-
     return {"ok": True}
 
 
@@ -67,18 +63,19 @@ async def telegram_webhook(request: Request):
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
     try:
-        # Читаем JSON или form-data
         try:
             data = await request.json()
         except:
             form = await request.form()
             data = dict(form)
 
+        # Логируем, чтобы отследить что приходит
+        bot.send_message(ADMIN_ID, f"[WEBHOOK DATA] {data}")
+
         raw_order = str(data.get("order_id", ""))
         customer_extra = unquote(str(data.get("customer_extra", "")))
 
-        # Определяем user_id
-        if raw_order.isdigit() and len(raw_order) > 5:
+        if raw_order.isdigit():
             user_id = int(raw_order)
         elif "пользователя" in customer_extra:
             user_id = int(customer_extra.split()[-1])
@@ -86,19 +83,15 @@ async def prodamus_webhook(request: Request):
             bot.send_message(ADMIN_ID, f"[ALERT] Не удалось определить user_id: {data}")
             return {"status": "error", "message": "Не удалось определить user_id"}
 
-        # Создаём одноразовую ссылку
-        bot.unban_chat_member(CHANNEL_ID, user_id)
         invite = bot.create_chat_invite_link(
             chat_id=CHANNEL_ID,
             expire_date=None,
             member_limit=1
         )
 
-        # Отправляем пользователю
-        bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
-        bot.send_message(ADMIN_ID, f"Оплатил пользователь {user_id}. Ссылка выдана.")
+        bot.send_message(user_id, f"✅ Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
+        bot.send_message(ADMIN_ID, f"💰 Оплатил пользователь {user_id}. Ссылка выдана.")
 
-        # Сохраняем без ограничения по времени
         active_users[user_id] = datetime.now()
         save_users()
 
@@ -120,7 +113,7 @@ def start(message):
     )
     bot.send_message(
         message.chat.id,
-        f"Привет! Оплати {PRICE}₽, чтобы попасть в канал.\n"
+        f"Привет! Оплати {PRICE}₽ за гайд «Меняя реальность».\n"
         f"Твой ID: {message.from_user.id}",
         reply_markup=markup
     )
