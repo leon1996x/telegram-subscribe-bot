@@ -2,76 +2,47 @@ import os
 import json
 import threading
 import time
-from datetime import datetime, timedelta
+import requests
 from urllib.parse import unquote
 from fastapi import FastAPI, Request
 import telebot
 
 # === CONFIG ===
-TOKEN = os.getenv("BOT_TOKEN")  # токен бота
+TOKEN = os.getenv("BOT_TOKEN")
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
-CHANNEL_ID = -1002681575953      # ID твоего канала
-PRICE = 890                      # цена
-ACCESS_DAYS = 30                 # 30 дней доступа
+CHANNEL_ID = -1002681575953
+PRICE = 1590
 USERS_FILE = "users.json"
-
-ADMIN_ID = 513148972             # твой Telegram ID
+ADMIN_ID = 513148972
+PING_URL = "https://telegram-subscribe-bot-5oh7.onrender.com"  # замени на свой адрес Render
 
 bot = telebot.TeleBot(TOKEN)
 app = FastAPI()
 
-# Хранилище активных пользователей
-active_users = {}
+active_users = set()
 
 
-# === Загрузка/сохранение пользователей ===
+# === Загрузка/сохранение ===
 def load_users():
     global active_users
     if os.path.exists(USERS_FILE):
         try:
             with open(USERS_FILE, "r") as f:
                 data = json.load(f)
-                active_users = {int(uid): datetime.fromisoformat(ts) for uid, ts in data.items()}
+                active_users = set(map(int, data))
         except:
-            active_users = {}
+            active_users = set()
 
 def save_users():
     with open(USERS_FILE, "w") as f:
-        json.dump({uid: ts.isoformat() for uid, ts in active_users.items()}, f)
+        json.dump(list(active_users), f)
 
 
-# === Проверка и удаление просроченных подписок ===
-def check_expired():
-    now = datetime.now()
-    expired_users = [uid for uid, expiry in active_users.items() if now >= expiry]
-
-    for uid in expired_users:
-        try:
-            print(f"[CHECK] Кикаю {uid}")
-            bot.ban_chat_member(CHANNEL_ID, uid)    # кик
-            bot.unban_chat_member(CHANNEL_ID, uid)  # анбан
-            bot.send_message(uid, "Срок подписки истёк. Чтобы продлить — оплатите снова /start.")
-            bot.send_message(ADMIN_ID, f"Пользователь {uid} удалён из канала — подписка истекла.")
-        except Exception as e:
-            print(f"[CHECK] Ошибка при кике {uid}: {e}")
-            bot.send_message(ADMIN_ID, f"Ошибка при кике {uid}: {e}")
-        del active_users[uid]
-        save_users()
-
-
-# === Фоновая проверка каждую минуту ===
-def subscription_watcher():
-    print("[WATCHER] Запущен мониторинг подписок")
-    while True:
-        check_expired()
-        time.sleep(60)  # проверка раз в минуту
-
-
-# === Генерация ссылки на оплату ===
+# === Оплата ===
 def generate_payment_link(user_id: int):
     params = {
         "do": "pay",
-        "products[0][name]": "Доступ в канал Меняя реальность",
+        "products[0][name]": "Оплата за гайд <<Меняя реальность>>",
         "products[0][price]": PRICE,
         "products[0][quantity]": 1,
         "order_id": str(user_id),
@@ -81,34 +52,27 @@ def generate_payment_link(user_id: int):
     return f"{PAYFORM_URL}/?{query}"
 
 
-# === Telegram webhook ===
 @app.post("/webhook/telegram")
 async def telegram_webhook(request: Request):
-    check_expired()  # проверка на каждом апдейте
     json_data = await request.json()
     update = telebot.types.Update.de_json(json_data)
     bot.process_new_updates([update])
     return {"ok": True}
 
 
-# === Prodamus webhook ===
 @app.post("/webhook")
 async def prodamus_webhook(request: Request):
-    check_expired()  # проверка на каждом апдейте
     try:
-        # Читаем JSON или form-data
         try:
             data = await request.json()
         except:
             form = await request.form()
             data = dict(form)
 
-        # Декодируем customer_extra (убираем %20)
         raw_order = str(data.get("order_id", ""))
         customer_extra = unquote(str(data.get("customer_extra", "")))
 
-        # Определяем user_id
-        if raw_order.isdigit() and len(raw_order) > 9:
+        if raw_order.isdigit():
             user_id = int(raw_order)
         elif "пользователя" in customer_extra:
             user_id = int(customer_extra.split()[-1])
@@ -116,20 +80,13 @@ async def prodamus_webhook(request: Request):
             bot.send_message(ADMIN_ID, f"[ALERT] Не удалось определить user_id: {data}")
             return {"status": "error", "message": "Не удалось определить user_id"}
 
-        # Создаём одноразовую ссылку
         bot.unban_chat_member(CHANNEL_ID, user_id)
-        invite = bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID,
-            expire_date=None,
-            member_limit=1
-        )
+        invite = bot.create_chat_invite_link(chat_id=CHANNEL_ID, expire_date=None, member_limit=1)
 
-        # Отправляем пользователю
-        bot.send_message(user_id, f"Оплата успешна! Вот ссылка для входа: {invite.invite_link}")
-        bot.send_message(ADMIN_ID, f"Оплатил пользователь {user_id}. Ссылка выдана.")
+        bot.send_message(user_id, f"✅ Оплата прошла успешно!\n\nВот ваша ссылка:\n{invite.invite_link}")
+        bot.send_message(ADMIN_ID, f"💰 Оплатил пользователь {user_id}. Ссылка выдана.")
 
-        # Сохраняем дату окончания подписки (30 дней)
-        active_users[user_id] = datetime.now() + timedelta(days=ACCESS_DAYS)
+        active_users.add(user_id)
         save_users()
 
         return {"status": "success"}
@@ -139,30 +96,39 @@ async def prodamus_webhook(request: Request):
         return {"status": "error", "message": str(e)}
 
 
-# === Команда /start ===
 @bot.message_handler(commands=["start"])
 def start(message):
     markup = telebot.types.InlineKeyboardMarkup()
     markup.add(
         telebot.types.InlineKeyboardButton(
-            f"Оплатить {PRICE}₽ / месяц", url=generate_payment_link(message.from_user.id)
+            f"Оплатить {PRICE}₽", url=generate_payment_link(message.from_user.id)
         )
     )
     bot.send_message(
         message.chat.id,
-        f"Привет! Оплати подписку {PRICE}₽, чтобы попасть в канал.\n"
-        f"Твой ID: {message.from_user.id}",
+        f"Привет! 👋\n"
+        f"Чтобы получить доступ к каналу <<Меняя реальность>>, оплатите {PRICE}₽.\n"
+        f"Единоразовая оплата — доступ навсегда.\n\n"
+        f"Ваш ID: {message.from_user.id}",
         reply_markup=markup
     )
 
 
-# === Корневой эндпоинт (проверка пингера) ===
 @app.get("/")
 async def home():
-    check_expired()
     return {"status": "Bot is running!"}
 
 
-# === Запуск при старте приложения ===
+# === Пинг каждые 2 минуты ===
+def ping_self():
+    while True:
+        try:
+            requests.get(PING_URL, timeout=10)
+        except:
+            pass
+        time.sleep(120)  # 2 минуты
+
+
+# === Запуск ===
 load_users()
-threading.Thread(target=subscription_watcher, daemon=True).start()
+threading.Thread(target=ping_self, daemon=True).start()
