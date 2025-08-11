@@ -11,7 +11,7 @@ import telebot
 TOKEN = os.getenv("BOT_TOKEN")  # токен бота
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 CHANNEL_ID = -1002681575953      # ID канала
-PRICE = 50                     # цена
+PRICE = 1590                     # цена
 USERS_FILE = "users.json"
 
 ADMIN_ID = 513148972             # твой Telegram ID
