@@ -4,3 +4,5 @@ pyTelegramBotAPI
 requests
 aiohttp==3.9.5
 python-multipart
+gspread
+oauth2client
