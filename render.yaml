@@ -1,7 +1,0 @@
-services:
-  - type: web
-    name: telegram-subscribe-bot
-    env: python
-    plan: free
-    buildCommand: ""
-    startCommand: "python main.py"
