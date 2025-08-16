@@ -1,32 +1,49 @@
-from fastapi import FastAPI
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+import os
+import logging
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils import executor
 
-# === Подключаемся к Google Sheets ===
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name("GSPREAD_CREDENTIALS.json", scope)
-client = gspread.authorize(creds)
+logging.basicConfig(level=logging.INFO)
 
-# Подключаем таблицу
-spreadsheet = client.open("BotData")  # название таблицы
-sheet = spreadsheet.sheet1  # первый лист
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = 7145469393  # 👉 сюда вставь свой телеграм id
 
-# === FastAPI ===
-app = FastAPI()
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher(bot)
 
-@app.get("/")
-def home():
-    return {"status": "ok", "message": "FastAPI работает!"}
+# --- КНОПКИ ---
+def admin_keyboard():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("📋 Посмотреть данные"))
+    kb.add(KeyboardButton("➕ Добавить запись"))
+    kb.add(KeyboardButton("❌ Удалить запись"))
+    kb.add(KeyboardButton("🚪 Выйти"))
+    return kb
 
-@app.get("/test")
-def test():
-    """Добавляет тестовую строку в Google Sheets"""
-    new_row = ["Привет", "Тест", "От бота"]
-    sheet.append_row(new_row)
-    return {"status": "ok", "added_row": new_row}
+# --- КОМАНДА /admin ---
+@dp.message_handler(commands=["admin"])
+async def cmd_admin(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("🔑 Админ-панель:", reply_markup=admin_keyboard())
+    else:
+        await message.answer("⛔ У вас нет доступа!")
 
-@app.get("/rows")
-def rows():
-    """Возвращает все строки"""
-    data = sheet.get_all_values()
-    return {"status": "ok", "rows": data}
+# --- ОБРАБОТКА КНОПОК ---
+@dp.message_handler(lambda message: message.text in ["📋 Посмотреть данные", "➕ Добавить запись", "❌ Удалить запись", "🚪 Выйти"])
+async def handle_admin_buttons(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ У вас нет доступа!")
+        return
+    
+    if message.text == "📋 Посмотреть данные":
+        await message.answer("Тут будет просмотр данных 📋")
+    elif message.text == "➕ Добавить запись":
+        await message.answer("Тут будет добавление ➕")
+    elif message.text == "❌ Удалить запись":
+        await message.answer("Тут будет удаление ❌")
+    elif message.text == "🚪 Выйти":
+        await message.answer("Вы вышли из админки.", reply_markup=types.ReplyKeyboardRemove())
+
+if __name__ == "__main__":
+    executor.start_polling(dp, skip_updates=True)
