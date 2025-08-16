@@ -6,3 +6,4 @@ aiohttp==3.9.5
 python-multipart
 gspread
 oauth2client
+aiogram==2.25.1
