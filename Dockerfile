@@ -1,15 +1,20 @@
-# Используем Python 3.12
+# Используем стабильный образ Python
 FROM python:3.12-slim
 
-# Директория внутри контейнера
+# Устанавливаем зависимости для сборки
+RUN apt-get update && apt-get install -y gcc g++ make
+
+# Создаём рабочую папку
 WORKDIR /app
 
-# Сначала ставим зависимости
+# Сначала копируем requirements.txt
 COPY requirements.txt .
+
+# Устанавливаем зависимости
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Потом копируем весь проект
+# Копируем весь проект
 COPY . .
 
-# Запуск бота
+# Запуск (как в твоём Procfile)
 CMD ["python", "main.py"]
