@@ -9,7 +9,7 @@ creds = ServiceAccountCredentials.from_json_keyfile_name("GSPREAD_CREDENTIALS.js
 client = gspread.authorize(creds)
 
 # Открываем таблицу (по названию — то, что ты ввёл в Google Sheets)
-sheet = client.open("TelegramBotAdmin").sheet1  
+sheet = client.open("BotData").sheet1
 
 # Чтение 1-й строки
 row_1 = sheet.row_values(1)
