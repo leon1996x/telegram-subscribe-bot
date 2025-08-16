@@ -1,21 +1,32 @@
+from fastapi import FastAPI
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
-# Подключение к Google Sheets
-scope = ["https://spreadsheets.google.com/feeds",
-         "https://www.googleapis.com/auth/drive"]
-
+# === Подключаемся к Google Sheets ===
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name("GSPREAD_CREDENTIALS.json", scope)
 client = gspread.authorize(creds)
 
-# Открываем таблицу (по названию — то, что ты ввёл в Google Sheets)
-sheet = client.open("BotData").sheet1
+# Подключаем таблицу
+spreadsheet = client.open("BotData")  # название таблицы
+sheet = spreadsheet.sheet1  # первый лист
 
-# Чтение 1-й строки
-row_1 = sheet.row_values(1)
-print("Данные из 1-й строки:", row_1)
+# === FastAPI ===
+app = FastAPI()
 
-# Добавление новой строки
-sheet.append_row(["Привет", "Тест", "От бота"])
-print("✅ Записал новую строку!")
+@app.get("/")
+def home():
+    return {"status": "ok", "message": "FastAPI работает!"}
 
+@app.get("/test")
+def test():
+    """Добавляет тестовую строку в Google Sheets"""
+    new_row = ["Привет", "Тест", "От бота"]
+    sheet.append_row(new_row)
+    return {"status": "ok", "added_row": new_row}
+
+@app.get("/rows")
+def rows():
+    """Возвращает все строки"""
+    data = sheet.get_all_values()
+    return {"status": "ok", "rows": data}
