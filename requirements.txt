@@ -2,7 +2,7 @@ fastapi
 uvicorn
 pyTelegramBotAPI
 requests
-aiohttp==3.9.5
+aiohttp==3.8.6
 python-multipart
 gspread==6.1.2
 oauth2client==4.1.3
