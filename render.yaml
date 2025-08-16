@@ -1,7 +1,7 @@
 services:
   - type: web
-    name: telegram-bot
-    env: docker
+    name: telegram-subscribe-bot
+    env: python
     plan: free
-    autoDeploy: true
-    dockerCommand: python main.py
+    buildCommand: ""
+    startCommand: "python main.py"
