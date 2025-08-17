@@ -29,7 +29,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
 gc = gspread.authorize(credentials)
 sh = gc.open_by_key(GSHEET_ID)
-worksheet = sh.worksheet("BotData")  # используем твой лист BotData
+worksheet = sh.sheet1  # первая страница
 
 # --- FSM для добавления поста ---
 class PostForm(StatesGroup):
