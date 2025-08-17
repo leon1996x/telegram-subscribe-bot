@@ -1,6 +1,6 @@
 fastapi==0.116.1
 uvicorn==0.35.0
-pyTelegramBotAPI==4.28.0
+aiogram==3.10.0
 requests==2.32.4
 gspread==6.1.2
 oauth2client==4.1.3
