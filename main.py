@@ -7,9 +7,9 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "ТВОЙ_ТОКЕН"
-ADMIN_ID = 123456789   # твой id
-GSHEET_KEY = "ТВОЙ_КЛЮЧ_ОТ_ТАБЛИЦЫ"  # ключ от Google Sheets
+BOT_TOKEN = "8299474635:AAFNGqAJYPFYRvjaHr6OGtG3eowFKwGq-ko"
+ADMIN_ID = 7145469393   # твой id
+GSHEET_KEY = "1YkIDFyCc561vPVNnKWsjFtFmHQeXl5vlH_0Rc7wXihE"  # ключ от Google Sheets
 
 logging.basicConfig(level=logging.INFO)
 
