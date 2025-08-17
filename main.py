@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 import gspread
@@ -5,22 +6,35 @@ import gspread
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from google.oauth2.service_account import Credentials
+
+# --- ЛОГИ ---
+logging.basicConfig(level=logging.INFO)
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = "8299474635:AAFNGqAJYPFYRvjaHr6OGtG3eowFKwGq-ko"
-ADMIN_ID = 7145469393   # твой id
-GSHEET_KEY = "1YkIDFyCc561vPVNnKWsjFtFmHQeXl5vlH_0Rc7wXihE"  # ключ от Google Sheets
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # токен бота из Environment Variables
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))  # твой ID (можно тоже в Env)
+GSHEET_ID = os.getenv("GSHEET_ID")  # ID таблицы
 
-logging.basicConfig(level=logging.INFO)
+# --- Проверка обязательных переменных ---
+if not BOT_TOKEN:
+    raise ValueError("❌ Не найден BOT_TOKEN в переменных окружения")
+if not GSHEET_ID:
+    raise ValueError("❌ Не найден GSHEET_ID в переменных окружения")
 
 # --- Telegram bot ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # --- Google Sheets ---
-gc = gspread.service_account(filename="creds.json")  # creds.json нужно загрузить в проект
-sh = gc.open_by_key(GSHEET_KEY)
-worksheet = sh.sheet1
+CREDENTIALS_FILE = "/etc/secrets/GSPREAD_CREDENTIALS.json"
+
+creds = Credentials.from_service_account_file(
+    CREDENTIALS_FILE,
+    scopes=["https://www.googleapis.com/auth/spreadsheets"]
+)
+gc = gspread.authorize(creds)
+worksheet = gc.open_by_key(GSHEET_ID).sheet1
 
 # --- КНОПКИ ---
 def admin_keyboard():
@@ -62,8 +76,9 @@ async def handle_admin_buttons(message: types.Message):
         await message.answer("✅ Запись добавлена!")
 
     elif message.text == "❌ Удалить запись":
-        if len(worksheet.get_all_values()) > 1:
-            worksheet.delete_rows(len(worksheet.get_all_values()))
+        rows = worksheet.get_all_values()
+        if len(rows) > 1:
+            worksheet.delete_rows(len(rows))
             await message.answer("❌ Последняя запись удалена")
         else:
             await message.answer("⚠️ Удалять нечего")
