@@ -73,24 +73,39 @@ class PostStates(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     try:
-        posts = ws.get_all_records() if ws else []
-        posts = [p for p in posts if p.get("post_id")]
+        if not ws:
+            await message.answer("⚠️ База данных временно недоступна")
+            return
+            
+        records = ws.get_all_records()
+        posts = [p for p in records if str(p.get("post_id", "")).strip()]
         
         if not posts:
-            await message.answer("📭 Нет доступных постов")
+            await message.answer("📭 Пока нет опубликованных постов")
             return
             
         for post in posts:
-            text = post.get("post_text", "")
-            photo = post.get("post_photo", "")
+            text = post.get("post_text", "Без текста")
+            photo = post.get("post_photo", "").strip()
             
-            if photo:
-                await message.answer_photo(photo, caption=text)
-            else:
-                await message.answer(text)
+            try:
+                if photo:
+                    await message.answer_photo(
+                        photo=photo,
+                        caption=text
+                    )
+                else:
+                    await message.answer(text)
+            except Exception as e:
+                logger.error(f"Ошибка отправки поста {post.get('post_id')}: {e}")
+                await message.answer(f"📄 {text[:300]}" + ("..." if len(text) > 300 else ""))
+                
+    except gspread.exceptions.APIError as e:
+        logger.error(f"Ошибка Google Sheets: {e}")
+        await message.answer("⚠️ Ошибка загрузки данных. Попробуйте позже")
     except Exception as e:
-        logger.error(f"Ошибка в /start: {e}")
-        await message.answer("⚠️ Ошибка загрузки постов")
+        logger.error(f"Неожиданная ошибка в /start: {e}")
+        await message.answer("❌ Произошла ошибка при загрузке постов")
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
@@ -117,28 +132,34 @@ async def list_posts_callback(callback: types.CallbackQuery):
         return
         
     posts = ws.get_all_records() if ws else []
-    posts = [p for p in posts if p.get("post_id")]
+    posts = [p for p in posts if str(p.get("post_id", "")).strip()]
     
     if not posts:
         await callback.message.answer("📭 Нет постов для отображения")
         return
         
     for post in posts:
-        text = post.get("post_text", "")
-        photo = post.get("post_photo", "")
-        post_id = post.get("post_id", "")
+        text = post.get("post_text", "Без текста")
+        photo = post.get("post_photo", "").strip()
+        post_id = post.get("post_id", "N/A")
         
-        if photo:
-            await callback.message.answer_photo(
-                photo,
-                caption=f"{text}\n\nID: {post_id}",
-                reply_markup=delete_kb(post_id)
-            )
-        else:
+        try:
+            if photo:
+                await callback.message.answer_photo(
+                    photo,
+                    caption=f"{text}\n\nID: {post_id}",
+                    reply_markup=delete_kb(post_id)
+                )
+            else:
+                await callback.message.answer(
+                    f"{text}\n\nID: {post_id}",
+                    reply_markup=delete_kb(post_id)
+                )
+        except Exception as e:
+            logger.error(f"Ошибка отправки поста {post_id}: {e}")
             await callback.message.answer(
-                f"{text}\n\nID: {post_id}",
-                reply_markup=delete_kb(post_id)
-            )
+                f"📄 {text[:300]}...\n\nID: {post_id}",
+                reply_markup=delete_kb(post_id))
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("delete_"))
@@ -188,6 +209,19 @@ async def process_post_photo(message: Message, state: FSMContext):
             post_id = max([int(p.get("post_id", 0)) for p in ws.get_all_records()] + [0]) + 1
             ws.append_row(["", "", "", "", "", post_id, text, photo_url])
             await message.answer(f"✅ Пост добавлен (ID: {post_id})")
+            
+            # Рассылка всем пользователям
+            records = ws.get_all_records()
+            user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).isdigit()}
+            
+            for user_id in user_ids:
+                try:
+                    if photo_url:
+                        await bot.send_photo(chat_id=user_id, photo=photo_url, caption=text)
+                    else:
+                        await bot.send_message(chat_id=user_id, text=text)
+                except Exception as e:
+                    logger.error(f"Не удалось отправить пост {post_id} пользователю {user_id}: {e}")
         else:
             await message.answer("⚠️ База данных недоступна, пост не сохранен")
             
