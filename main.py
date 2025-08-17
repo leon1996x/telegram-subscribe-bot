@@ -3,6 +3,7 @@ import asyncio
 import logging
 import gspread
 
+from fastapi import FastAPI
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
@@ -12,11 +13,10 @@ from google.oauth2.service_account import Credentials
 logging.basicConfig(level=logging.INFO)
 
 # --- НАСТРОЙКИ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # токен бота из Environment Variables
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))  # твой ID (можно тоже в Env)
-GSHEET_ID = os.getenv("GSHEET_ID")  # ID таблицы
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
+GSHEET_ID = os.getenv("GSHEET_ID")
 
-# --- Проверка обязательных переменных ---
 if not BOT_TOKEN:
     raise ValueError("❌ Не найден BOT_TOKEN в переменных окружения")
 if not GSHEET_ID:
@@ -28,13 +28,19 @@ dp = Dispatcher()
 
 # --- Google Sheets ---
 CREDENTIALS_FILE = "/etc/secrets/GSPREAD_CREDENTIALS.json"
-
 creds = Credentials.from_service_account_file(
     CREDENTIALS_FILE,
     scopes=["https://www.googleapis.com/auth/spreadsheets"]
 )
 gc = gspread.authorize(creds)
 worksheet = gc.open_by_key(GSHEET_ID).sheet1
+
+# --- FastAPI ---
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Бот работает 🚀"}
 
 # --- КНОПКИ ---
 def admin_keyboard():
@@ -86,10 +92,9 @@ async def handle_admin_buttons(message: types.Message):
     elif message.text == "🚪 Выйти":
         await message.answer("Вы вышли из админки.", reply_markup=ReplyKeyboardRemove())
 
-# --- ЗАПУСК ---
-async def main():
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
+# --- Фоновый запуск бота ---
+@app.on_event("startup")
+async def on_startup():
+    loop = asyncio.get_event_loop()
+    loop.create_task(dp.start_polling(bot))
 
