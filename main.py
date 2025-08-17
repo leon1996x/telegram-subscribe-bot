@@ -1,50 +1,49 @@
 import os
-import logging
-import asyncio
-
-from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
 import gspread
-from google.oauth2.service_account import Credentials
+from fastapi import FastAPI, Request
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
-# --- НАСТРОЙКИ ---
+# === Конфиг ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
-GSHEET_ID = os.getenv("GSHEET_ID")
-CREDENTIALS_FILE = "GSPREAD_CREDENTIALS.json"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))  # твой Telegram ID
 
-logging.basicConfig(level=logging.INFO)
+# Google Sheets
+gc = gspread.service_account(filename="creds.json")
+sh = gc.open("TelegramBotDB")   # название таблицы
+try:
+    worksheet = sh.worksheet("BotData")
+except gspread.exceptions.WorksheetNotFound:
+    worksheet = sh.add_worksheet(title="BotData", rows="100", cols="10")
+    worksheet.append_row(["id", "name", "file_url", "subscription_type", "subscription_end",
+                          "post_id", "post_text", "post_photo"])
 
-# --- Инициализация ---
-bot = Bot(token=BOT_TOKEN)
+# === Bot + Dispatcher ===
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
+router = Router()
+dp.include_router(router)
+
 app = FastAPI()
 
-# --- Google Sheets ---
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
-gc = gspread.authorize(credentials)
-sh = gc.open_by_key(GSHEET_ID)
-worksheet = sh.sheet1  # первая страница
-
-# --- FSM для добавления поста ---
+# === FSM для постов ===
 class PostForm(StatesGroup):
     waiting_for_text = State()
     waiting_for_photo = State()
 
-# --- Хендлер /start (показывает все посты) ---
-@dp.message(F.text == "/start")
+# === /start ===
+@router.message(F.text == "/start")
 async def cmd_start(message: Message):
     records = worksheet.get_all_records()
     posts = [r for r in records if r.get("post_id")]
     if not posts:
-        await message.answer("Постов пока нет 🚫")
+        await message.answer("📭 Постов пока нет")
         return
-
     for post in posts:
         text = post.get("post_text", "")
         photo = post.get("post_photo", "")
@@ -53,115 +52,88 @@ async def cmd_start(message: Message):
         else:
             await message.answer(text)
 
-# --- Хендлер /admin ---
-@dp.message(F.text == "/admin")
+# === /admin ===
+@router.message(F.text == "/admin")
 async def cmd_admin(message: Message):
     if message.from_user.id != ADMIN_ID:
         return await message.answer("⛔ У тебя нет доступа")
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить пост", callback_data="add_post")],
         [InlineKeyboardButton(text="🗑 Удалить пост", callback_data="del_post_menu")],
     ])
     await message.answer("⚙️ Панель админа", reply_markup=kb)
 
-# --- Добавление поста ---
-@dp.callback_query(F.data == "add_post")
-async def process_add_post(callback: types.CallbackQuery, state: FSMContext):
+# === Добавление поста ===
+@router.callback_query(F.data == "add_post")
+async def add_post_handler(callback: CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
-        return await callback.answer("⛔ Нет доступа", show_alert=True)
+        return await callback.answer("⛔ Нет доступа")
     await state.set_state(PostForm.waiting_for_text)
-    await callback.message.answer("✍️ Введи текст поста:")
+    await callback.message.answer("✍️ Отправь текст поста")
+    await callback.answer()
 
-@dp.message(PostForm.waiting_for_text)
+@router.message(PostForm.waiting_for_text)
 async def process_post_text(message: Message, state: FSMContext):
-    await state.update_data(text=message.text)
+    await state.update_data(post_text=message.text)
     await state.set_state(PostForm.waiting_for_photo)
-    await message.answer("📷 Теперь пришли фото (или напиши 'нет'): ")
+    await message.answer("📎 Отправь фото (или напиши 'нет')")
 
-@dp.message(PostForm.waiting_for_photo)
+@router.message(PostForm.waiting_for_photo)
 async def process_post_photo(message: Message, state: FSMContext):
     data = await state.get_data()
-    text = data["text"]
-    photo_url = ""
-
+    text = data.get("post_text", "")
+    photo = None
     if message.photo:
-        file = await bot.get_file(message.photo[-1].file_id)
-        photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-    elif message.text.lower() == "нет":
-        photo_url = ""
+        photo = message.photo[-1].file_id
+    elif message.text and message.text.lower() == "нет":
+        photo = ""
+    else:
+        return await message.answer("Отправь фото или напиши 'нет'")
 
-    # Генерируем post_id = текущее количество строк + 1
     records = worksheet.get_all_records()
-    post_id = len([r for r in records if r.get("post_id")]) + 1
+    new_id = len(records) + 1
+    worksheet.append_row(["", "", "", "", "", str(new_id), text, photo])
 
-    worksheet.append_row(["", "", "", "", "", post_id, text, photo_url])
-    await message.answer("✅ Пост добавлен!")
     await state.clear()
+    await message.answer("✅ Пост добавлен!")
 
-# --- Удаление постов ---
-@dp.callback_query(F.data == "del_post_menu")
-async def process_del_menu(callback: types.CallbackQuery):
+# === Удаление постов ===
+@router.callback_query(F.data == "del_post_menu")
+async def del_post_menu(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
-        return await callback.answer("⛔ Нет доступа", show_alert=True)
-
+        return await callback.answer("⛔ Нет доступа")
     records = worksheet.get_all_records()
     posts = [r for r in records if r.get("post_id")]
-
     if not posts:
-        return await callback.message.answer("🚫 Нет постов для удаления")
+        return await callback.message.answer("📭 Нет постов для удаления")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"❌ {p['post_text'][:20]}", callback_data=f"del_{p['post_id']}")]
+        for p in posts
+    ])
+    await callback.message.answer("Выбери пост для удаления:", reply_markup=kb)
+    await callback.answer()
 
-    for post in posts:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="❌ Удалить", callback_data=f"del_{post['post_id']}")]
-        ])
-        text = post.get("post_text", "")
-        photo = post.get("post_photo", "")
-        if photo:
-            await callback.message.answer_photo(photo, caption=text, reply_markup=kb)
-        else:
-            await callback.message.answer(text, reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("del_"))
-async def process_delete_post(callback: types.CallbackQuery):
+@router.callback_query(F.data.startswith("del_"))
+async def del_post(callback: CallbackQuery):
     if callback.from_user.id != ADMIN_ID:
-        return await callback.answer("⛔ Нет доступа", show_alert=True)
-
+        return await callback.answer("⛔ Нет доступа")
     post_id = callback.data.split("_")[1]
-    records = worksheet.get_all_records()
-    for i, row in enumerate(records, start=2):  # с 2-й строки, т.к. 1-я — заголовки
-        if str(row.get("post_id")) == post_id:
-            worksheet.delete_rows(i)
-            await callback.message.answer(f"🗑 Пост {post_id} удалён")
-            return
-
-    await callback.message.answer("⚠️ Пост не найден!")
-
-# --- Webhook ---
-WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-WEBHOOK_URL = f"https://{RENDER_HOSTNAME}{WEBHOOK_PATH}" if RENDER_HOSTNAME else None
-
-@app.on_event("startup")
-async def on_startup():
-    if WEBHOOK_URL:
-        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-        logging.info(f"Webhook установлен: {WEBHOOK_URL}")
+    cell = worksheet.find(post_id)
+    if cell:
+        worksheet.delete_rows(cell.row)
+        await callback.message.answer("🗑 Пост удалён")
     else:
-        logging.error("Не найден RENDER_EXTERNAL_HOSTNAME — webhook не установлен!")
+        await callback.message.answer("⚠️ Пост не найден")
+    await callback.answer()
 
-@app.on_event("shutdown")
-async def on_shutdown():
-    await bot.delete_webhook()
-    await bot.session.close()
-
-@app.post(WEBHOOK_PATH)
-async def webhook_handler(request: Request):
+# === Webhook ===
+@app.post("/webhook")
+async def telegram_webhook(request: Request):
     data = await request.json()
-    update = types.Update(**data)
+    update = dp.updates_factory.create(data)
     await dp.feed_update(bot, update)
     return {"ok": True}
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "webhook": WEBHOOK_URL}
+    return {"status": "ok"}
