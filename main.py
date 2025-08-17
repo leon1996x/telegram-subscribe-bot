@@ -1,67 +1,73 @@
+import os
+import logging
+import asyncio
 
-gc = gspread.authorize(creds)
-worksheet = gc.open_by_key(GSHEET_ID).sheet1
+from fastapi import FastAPI, Request
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import Message
+import gspread
+from google.oauth2.service_account import Credentials
 
-# --- FastAPI ---
+# --- НАСТРОЙКИ ---
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # положи токен в переменные окружения Render
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
+GSHEET_ID = os.getenv("GSHEET_ID")  # ID таблицы из ссылки
+CREDENTIALS_FILE = "GSPREAD_CREDENTIALS.json"  # лежит в Secret Files на Render
+
+logging.basicConfig(level=logging.INFO)
+
+# --- Инициализация ---
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
 app = FastAPI()
 
-@app.get("/")
-async def root():
-    return {"status": "ok", "message": "Бот работает 🚀"}
+# --- Google Sheets ---
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+gc = gspread.authorize(credentials)
+sh = gc.open_by_key(GSHEET_ID)
+worksheet = sh.sheet1  # первая страница
 
-# --- КНОПКИ ---
-def admin_keyboard():
-    kb = [
-        [KeyboardButton(text="📋 Посмотреть данные")],
-        [KeyboardButton(text="➕ Добавить запись")],
-        [KeyboardButton(text="❌ Удалить запись")],
-        [KeyboardButton(text="🚪 Выйти")]
-    ]
-    return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
+# --- Хендлеры бота ---
+@dp.message()
+async def echo_handler(message: Message):
+    text = f"Пользователь {message.from_user.id} написал: {message.text}"
+    worksheet.append_row([str(message.from_user.id), message.text])  # лог в гугл
+    await message.answer("✅ Данные записаны в Google Sheets!")
 
-# --- КОМАНДА /start ---
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("Привет 👋 Это бот с Google Sheets!")
 
-# --- КОМАНДА /admin ---
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-    if message.from_user.id == ADMIN_ID:
-        await message.answer("🔑 Админ-панель:", reply_markup=admin_keyboard())
-    else:
-        await message.answer("⛔ У вас нет доступа!")
+# --- Webhook ---
+WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
+RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+WEBHOOK_URL = f"https://{RENDER_HOSTNAME}{WEBHOOK_PATH}" if RENDER_HOSTNAME else None
 
-# --- ОБРАБОТКА КНОПОК ---
-@dp.message(F.text.in_(["📋 Посмотреть данные", "➕ Добавить запись", "❌ Удалить запись", "🚪 Выйти"]))
-async def handle_admin_buttons(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ У вас нет доступа!")
-        return
 
-    if message.text == "📋 Посмотреть данные":
-        rows = worksheet.get_all_values()
-        text = "\n".join([", ".join(row) for row in rows]) if rows else "📂 Таблица пуста"
-        await message.answer(f"Данные из таблицы:\n\n{text}")
-
-    elif message.text == "➕ Добавить запись":
-        worksheet.append_row(["Новая запись"])
-        await message.answer("✅ Запись добавлена!")
-
-    elif message.text == "❌ Удалить запись":
-        rows = worksheet.get_all_values()
-        if len(rows) > 1:
-            worksheet.delete_rows(len(rows))
-            await message.answer("❌ Последняя запись удалена")
-        else:
-            await message.answer("⚠️ Удалять нечего")
-
-    elif message.text == "🚪 Выйти":
-        await message.answer("Вы вышли из админки.", reply_markup=ReplyKeyboardRemove())
-
-# --- Фоновый запуск бота ---
 @app.on_event("startup")
 async def on_startup():
-    loop = asyncio.get_event_loop()
-    loop.create_task(dp.start_polling(bot))
+    if WEBHOOK_URL:
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+        logging.info(f"Webhook установлен: {WEBHOOK_URL}")
+    else:
+        logging.error("Не найден RENDER_EXTERNAL_HOSTNAME — webhook не установлен!")
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await bot.delete_webhook()
+    await bot.session.close()
+
+
+@app.post(WEBHOOK_PATH)
+async def webhook_handler(request: Request):
+    data = await request.json()
+    update = types.Update(**data)
+    await dp.feed_update(bot, update)
+    return {"ok": True}
+
+
+# --- Для теста на / (GET) ---
+@app.get("/")
+async def root():
+    return {"status": "ok", "webhook": WEBHOOK_URL}
 
