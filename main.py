@@ -30,7 +30,7 @@ if not all([BOT_TOKEN, GSHEET_ID]):
     missing = [name for name, val in [("BOT_TOKEN", BOT_TOKEN), ("GSHEET_ID", GSHEET_ID)] if not val]
     raise RuntimeError(f"Не заданы: {', '.join(missing)}")
 
-# Инициализация бота (исправленная версия для aiogram 3.10.0)
+# Инициализация бота
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -99,7 +99,103 @@ async def cmd_admin(message: Message):
         return
     await message.answer("👨‍💻 Админ-панель:", reply_markup=admin_kb())
 
-# Остальные обработчики остаются без изменений...
+# Обработчики кнопок
+@dp.callback_query(F.data == "add_post")
+async def add_post_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+    
+    await state.set_state(PostStates.waiting_text)
+    await callback.message.answer("📝 Введите текст поста:")
+    await callback.answer()
+
+@dp.callback_query(F.data == "list_posts")
+async def list_posts_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+        
+    posts = ws.get_all_records() if ws else []
+    posts = [p for p in posts if p.get("post_id")]
+    
+    if not posts:
+        await callback.message.answer("📭 Нет постов для отображения")
+        return
+        
+    for post in posts:
+        text = post.get("post_text", "")
+        photo = post.get("post_photo", "")
+        post_id = post.get("post_id", "")
+        
+        if photo:
+            await callback.message.answer_photo(
+                photo,
+                caption=f"{text}\n\nID: {post_id}",
+                reply_markup=delete_kb(post_id)
+            )
+        else:
+            await callback.message.answer(
+                f"{text}\n\nID: {post_id}",
+                reply_markup=delete_kb(post_id)
+            )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("delete_"))
+async def delete_post_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+        
+    post_id = callback.data.split("_")[1]
+    try:
+        if ws:
+            records = ws.get_all_values()
+            for idx, row in enumerate(records[1:], start=2):
+                if str(row[5]) == str(post_id):
+                    ws.delete_rows(idx)
+                    await callback.message.delete()
+                    await callback.answer("✅ Пост удален")
+                    return
+        await callback.answer("❌ Пост не найден")
+    except Exception as e:
+        logger.error(f"Ошибка удаления: {e}")
+        await callback.answer("⚠️ Ошибка удаления")
+
+# Обработчики состояний
+@dp.message(PostStates.waiting_text)
+async def process_post_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await state.set_state(PostStates.waiting_photo)
+    await message.answer("📷 Отправьте фото или напишите 'пропустить'")
+
+@dp.message(PostStates.waiting_photo)
+async def process_post_photo(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        text = data.get("text", "")
+        
+        if message.photo:
+            file = await bot.get_file(message.photo[-1].file_id)
+            photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+        elif message.text and message.text.lower() == "пропустить":
+            photo_url = ""
+        else:
+            await message.answer("❌ Отправьте фото или напишите 'пропустить'")
+            return
+
+        if ws:
+            post_id = max([int(p.get("post_id", 0)) for p in ws.get_all_records()] + [0]) + 1
+            ws.append_row(["", "", "", "", "", post_id, text, photo_url])
+            await message.answer(f"✅ Пост добавлен (ID: {post_id})")
+        else:
+            await message.answer("⚠️ База данных недоступна, пост не сохранен")
+            
+    except Exception as e:
+        logger.error(f"Ошибка добавления поста: {e}")
+        await message.answer("❌ Ошибка при добавлении поста")
+    finally:
+        await state.clear()
 
 # Webhook
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
