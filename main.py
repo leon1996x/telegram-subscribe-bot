@@ -1,28 +1,29 @@
 import os
 import logging
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
-from aiogram.fsm.context import FSMContext  # <-- Исправленный импорт
-from aiogram.fsm.state import State, StatesGroup  # <-- Исправленный импорт
-from aiogram.fsm.storage.memory import MemoryStorage  # <-- Исправленный импорт
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- НАСТРОЙКИ ---
+# --- Конфигурация ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
 GSHEET_ID = "1YkIDFyCc561vPVNnKWsjFtFmHQeXl5vlH_0Rc7wXihE"
-CREDENTIALS_FILE = "GSPREAD_CREDENTIALS.json"
+CREDENTIALS_FILE = "telegrambotadmin-469121-2a7c6c1c9414.json"  # Ваш файл из Secrets
 
 logging.basicConfig(level=logging.INFO)
 
 # --- Инициализация ---
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
-dp = Dispatcher(bot, storage=storage)  # <-- Передаём storage в Dispatcher
+dp = Dispatcher(storage=storage)
 
 app = FastAPI()
 
@@ -33,123 +34,130 @@ gc = gspread.authorize(credentials)
 sh = gc.open_by_key(GSHEET_ID)
 worksheet = sh.worksheet("BotData")
 
-# --- FSM (Состояния для добавления поста) ---
+# --- FSM States ---
 class PostStates(StatesGroup):
     waiting_for_text = State()
     waiting_for_photo = State()
 
 # --- Команда /start ---
-@dp.message(commands=['start'])
+@dp.message(Command("start"))
 async def start_handler(message: Message):
     try:
-        last_post = worksheet.get_all_records()[-1]
-        post_text = last_post["post_text"]
-        post_photo = last_post["post_photo"]
-
-        if post_photo:
-            await bot.send_photo(
-                chat_id=message.chat.id,
-                photo=post_photo,
-                caption=post_text,
-                reply_markup=create_delete_button(last_post["post_id"]) if str(message.from_user.id) == ADMIN_ID else None
+        records = worksheet.get_all_records()
+        if not records:
+            await message.answer("Пока нет постов.")
+            return
+            
+        last_post = records[-1]
+        markup = None
+        
+        if str(message.from_user.id) == ADMIN_ID:
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="🗑️ Удалить пост", callback_data=f"delete_{last_post['post_id']}")]
+                ]
+            )
+        
+        if last_post.get("post_photo"):
+            await message.answer_photo(
+                photo=last_post["post_photo"],
+                caption=last_post["post_text"],
+                reply_markup=markup
             )
         else:
             await message.answer(
-                post_text,
-                reply_markup=create_delete_button(last_post["post_id"]) if str(message.from_user.id) == ADMIN_ID else None
+                text=last_post["post_text"],
+                reply_markup=markup
             )
-    except IndexError:
-        await message.answer("Пока нет постов.")
+    except Exception as e:
+        logging.error(f"Ошибка в /start: {e}")
+        await message.answer("Произошла ошибка")
 
 # --- Команда /admin ---
-@dp.message(commands=['admin'])
+@dp.message(Command("admin"))
 async def admin_panel(message: Message):
     if str(message.from_user.id) != ADMIN_ID:
-        await message.answer("🚫 Доступ запрещён!")
         return
+        
+    await message.answer(
+        "Админ-панель:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Добавить пост", callback_data="add_post")]
+            ]
+        )
+    )
 
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("➕ Добавить пост", callback_data="add_post"))
-    await message.answer("Админ-панель:", reply_markup=keyboard)
-
-# --- Обработка кнопки "Добавить пост" ---
+# --- Добавление поста ---
 @dp.callback_query(lambda c: c.data == "add_post")
-async def add_post_callback(callback_query: types.CallbackQuery):
-    await bot.answer_callback_query(callback_query.id)
-    await bot.send_message(callback_query.from_user.id, "📝 Введите текст поста:")
-    await dp.fsm.set_state(callback_query.from_user.id, PostStates.waiting_for_text)
+async def add_post_start(callback: types.CallbackQuery, state: FSMContext):
+    await callback.message.answer("Введите текст поста:")
+    await state.set_state(PostStates.waiting_for_text)
+    await callback.answer()
 
-# --- Ожидание текста поста ---
 @dp.message(PostStates.waiting_for_text)
 async def process_post_text(message: Message, state: FSMContext):
     await state.update_data(post_text=message.text)
-    await message.answer("📤 Теперь отправьте фото (или нажмите /skip, если без фото):")
-    await dp.fsm.set_state(message.from_user.id, PostStates.waiting_for_photo)
+    await message.answer("Отправьте фото или нажмите /skip")
+    await state.set_state(PostStates.waiting_for_photo)
 
-# --- Ожидание фото (или пропуск) ---
-@dp.message(PostStates.waiting_for_photo, content_types=['photo'])
-async def process_post_photo(message: Message, state: FSMContext):
-    photo_id = message.photo[-1].file_id
-    data = await state.get_data()
-    await save_post_to_sheets(data["post_text"], photo_id)
-    await message.answer("✅ Пост добавлен!")
-    await state.clear()
-
-@dp.message(PostStates.waiting_for_photo, commands=['skip'])
+@dp.message(PostStates.waiting_for_photo, Command("skip"))
 async def skip_photo(message: Message, state: FSMContext):
     data = await state.get_data()
-    await save_post_to_sheets(data["post_text"], "")
-    await message.answer("✅ Пост добавлен (без фото)!")
+    await save_post(data["post_text"], "")
+    await message.answer("Пост добавлен без фото!")
     await state.clear()
 
-# --- Сохранение поста в Google Sheets ---
-async def save_post_to_sheets(post_text: str, post_photo: str):
-    last_id = len(worksheet.get_all_records()) + 1
-    worksheet.append_row([last_id, "", "", "", "", last_id, post_text, post_photo])
+@dp.message(PostStates.waiting_for_photo)
+async def process_post_photo(message: Message, state: FSMContext):
+    if not message.photo:
+        await message.answer("Пожалуйста, отправьте фото или /skip")
+        return
+        
+    data = await state.get_data()
+    await save_post(data["post_text"], message.photo[-1].file_id)
+    await message.answer("Пост с фото добавлен!")
+    await state.clear()
 
-# --- Кнопка "Удалить пост" ---
-def create_delete_button(post_id: int) -> InlineKeyboardMarkup:
-    keyboard = InlineKeyboardMarkup()
-    keyboard.add(InlineKeyboardButton("🗑️ Удалить пост", callback_data=f"delete_post_{post_id}"))
-    return keyboard
+async def save_post(text: str, photo: str):
+    try:
+        last_id = len(worksheet.get_all_records()) + 1
+        worksheet.append_row([last_id, "", "", "", "", last_id, text, photo])
+    except Exception as e:
+        logging.error(f"Ошибка сохранения поста: {e}")
 
-# --- Обработка удаления поста ---
-@dp.callback_query(lambda c: c.data.startswith('delete_post_'))
-async def delete_post(callback_query: types.CallbackQuery):
-    post_id = int(callback_query.data.split('_')[-1])
-    records = worksheet.get_all_records()
-    for idx, row in enumerate(records, start=2):
-        if row["post_id"] == post_id:
-            worksheet.delete_rows(idx)
-            break
-    await bot.answer_callback_query(callback_query.id, "🗑️ Пост удалён!")
-    await bot.delete_message(callback_query.message.chat.id, callback_query.message.message_id)
+# --- Удаление поста ---
+@dp.callback_query(lambda c: c.data.startswith("delete_"))
+async def delete_post(callback: types.CallbackQuery):
+    post_id = int(callback.data.split("_")[1])
+    try:
+        records = worksheet.get_all_records()
+        for idx, row in enumerate(records, start=2):
+            if row["post_id"] == post_id:
+                worksheet.delete_rows(idx)
+                break
+        await callback.message.delete()
+        await callback.answer("Пост удалён")
+    except Exception as e:
+        logging.error(f"Ошибка удаления поста: {e}")
+        await callback.answer("Ошибка удаления")
 
 # --- Webhook ---
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
-RENDER_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-WEBHOOK_URL = f"https://{RENDER_HOSTNAME}{WEBHOOK_PATH}" if RENDER_HOSTNAME else None
+WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
 
 @app.on_event("startup")
-async def on_startup():
-    if WEBHOOK_URL:
-        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-        logging.info(f"Webhook установлен: {WEBHOOK_URL}")
-    else:
-        logging.error("Не найден RENDER_EXTERNAL_HOSTNAME — webhook не установлен!")
-
-@app.on_event("shutdown")
-async def on_shutdown():
-    await bot.delete_webhook()
-    await bot.session.close()
+async def startup():
+    if os.getenv("RENDER"):
+        await bot.set_webhook(WEBHOOK_URL)
+        logging.info("Webhook установлен")
 
 @app.post(WEBHOOK_PATH)
-async def webhook_handler(request: Request):
-    data = await request.json()
-    update = types.Update(**data)
-    await dp.feed_update(bot, update)
+async def webhook(request: Request):
+    update = await request.json()
+    await dp.feed_update(bot, types.Update(**update))
     return {"ok": True}
 
 @app.get("/")
-async def root():
-    return {"status": "ok", "webhook": WEBHOOK_URL}
+async def health_check():
+    return {"status": "ok"}
