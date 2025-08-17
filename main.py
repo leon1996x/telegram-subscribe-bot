@@ -27,6 +27,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
 GSHEET_ID = os.getenv("GSHEET_ID")
 
+# Проверка обязательных переменных
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не задан")
 if not GSHEET_ID:
@@ -41,24 +42,41 @@ bot = Bot(
 dp = Dispatcher(storage=MemoryStorage())
 
 # -------------------- Работа с Google Sheets --------------------
+def init_google_sheets():
+    """Инициализация подключения к Google Sheets"""
+    try:
+        # Вариант 1: Через переменную окружения (для Render)
+        creds_json = os.getenv("GSPREAD_CREDENTIALS_JSON")
+        if creds_json:
+            creds_dict = json.loads(creds_json)
+            credentials = Credentials.from_service_account_info(creds_dict)
+            return gspread.authorize(credentials)
+        
+        # Вариант 2: Через файл (для локального тестирования)
+        creds_file = "service_account.json"
+        if os.path.exists(creds_file):
+            credentials = Credentials.from_service_account_file(creds_file)
+            return gspread.authorize(credentials)
+            
+        raise ValueError("Не найдены учетные данные Google Sheets")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации Google Sheets: {e}")
+        raise
+
 try:
-    # Получаем credentials из переменной окружения
-    creds_json = os.getenv("GSPREAD_CREDENTIALS")
-    if not creds_json:
-        raise ValueError("GSPREAD_CREDENTIALS не заданы")
-    
-    creds_dict = json.loads(creds_json)
-    credentials = Credentials.from_service_account_info(creds_dict)
-    gc = gspread.authorize(credentials)
+    gc = init_google_sheets()
     sh = gc.open_by_key(GSHEET_ID)
     ws = sh.sheet1
 except Exception as e:
-    logger.error(f"Ошибка инициализации Google Sheets: {e}")
-    raise
+    logger.critical(f"Не удалось подключиться к Google Sheets: {e}")
+    ws = None  # Режим без базы данных
 
 # -------------------- Вспомогательные функции --------------------
 def ensure_headers():
     """Проверяем наличие нужных заголовков в таблице"""
+    if not ws:
+        return
+        
     try:
         headers = ws.row_values(1)
         required_headers = [
@@ -72,10 +90,12 @@ def ensure_headers():
             ws.append_row(required_headers)
     except Exception as e:
         logger.error(f"Ошибка проверки заголовков: {e}")
-        raise
 
 def get_all_posts() -> List[dict]:
     """Получаем все посты из таблицы"""
+    if not ws:
+        return []
+        
     try:
         records = ws.get_all_records()
         return [r for r in records if str(r.get("post_id", "")).strip()]
@@ -83,22 +103,25 @@ def get_all_posts() -> List[dict]:
         logger.error(f"Ошибка получения постов: {e}")
         return []
 
-def add_post(text: str, photo_url: str = "") -> int:
+def add_post(text: str, photo_url: str = "") -> Optional[int]:
     """Добавляем новый пост и возвращаем его ID"""
+    if not ws:
+        return None
+        
     try:
-        # Находим максимальный существующий ID
         posts = get_all_posts()
         post_id = max([p.get("post_id", 0) for p in posts] + [0]) + 1
-        
-        # Добавляем новую строку
         ws.append_row(["", "", "", "", "", post_id, text, photo_url])
         return post_id
     except Exception as e:
         logger.error(f"Ошибка добавления поста: {e}")
-        raise
+        return None
 
 def delete_post(post_id: int) -> bool:
     """Удаляем пост по ID"""
+    if not ws:
+        return False
+        
     try:
         records = ws.get_all_values()
         for idx, row in enumerate(records[1:], start=2):  # Пропускаем заголовки
@@ -207,10 +230,13 @@ async def process_post_photo(message: Message, state: FSMContext):
             
         # Сохраняем пост
         post_id = add_post(text, photo_url)
-        await message.answer(f"Пост успешно добавлен (ID: {post_id})")
-        
-        # Рассылаем пост всем пользователям (асинхронно)
-        asyncio.create_task(broadcast_post(text, photo_url, post_id))
+        if post_id:
+            await message.answer(f"Пост успешно добавлен (ID: {post_id})")
+            
+            # Рассылаем пост (асинхронно)
+            asyncio.create_task(broadcast_post(text, photo_url, post_id))
+        else:
+            await message.answer("Не удалось сохранить пост.")
         
     except Exception as e:
         logger.error(f"Ошибка добавления поста: {e}")
@@ -221,19 +247,18 @@ async def process_post_photo(message: Message, state: FSMContext):
 async def broadcast_post(text: str, photo_url: str, post_id: int):
     """Рассылаем пост всем пользователям"""
     try:
-        # В реальном боте здесь нужно получать список пользователей
-        # Для примера просто отправляем админу
+        # Отправляем админу с кнопкой удаления
         if photo_url:
             await bot.send_photo(
                 chat_id=ADMIN_ID,
                 photo=photo_url,
-                caption=text,
+                caption=f"{text}\n\nID: {post_id}",
                 reply_markup=delete_button(post_id)
             )
         else:
             await bot.send_message(
                 chat_id=ADMIN_ID,
-                text=text,
+                text=f"{text}\n\nID: {post_id}",
                 reply_markup=delete_button(post_id)
             )
     except Exception as e:
@@ -292,7 +317,7 @@ WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
 
 @app.on_event("startup")
 async def on_startup():
-    ensure_headers()  # Проверяем заголовки таблицы
+    ensure_headers()
     if os.getenv("RENDER"):
         await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
