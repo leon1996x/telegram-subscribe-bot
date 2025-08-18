@@ -69,21 +69,47 @@ class PostStates(StatesGroup):
     waiting_text = State()
     waiting_photo = State()
 
+# Регистрация пользователя
+async def register_user(user: types.User):
+    if not ws:
+        return
+        
+    try:
+        user_id = str(user.id)
+        records = ws.get_all_records()
+        
+        # Проверяем, есть ли уже пользователь
+        if not any(str(r.get("id", "")) == user_id for r in records):
+            ws.append_row([
+                user_id,
+                user.username or "",
+                "",  # file_url
+                "",  # subscription_type
+                "",  # subscription_end
+                "",  # post_id
+                "",  # post_text
+                ""   # post_photo
+            ])
+            logger.info(f"Зарегистрирован новый пользователь: {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка регистрации пользователя: {e}")
+
 # Обработчики команд
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     try:
-        if not ws:
-            await message.answer("⚠️ База данных временно недоступна")
-            return
-            
-        records = ws.get_all_records()
+        # Регистрируем пользователя
+        await register_user(message.from_user)
+        
+        # Получаем все посты
+        records = ws.get_all_records() if ws else []
         posts = [p for p in records if str(p.get("post_id", "")).strip()]
         
         if not posts:
             await message.answer("📭 Пока нет опубликованных постов")
             return
             
+        # Отправляем посты пользователю
         for post in posts:
             text = post.get("post_text", "Без текста")
             photo_id = post.get("post_photo", "").strip()
@@ -92,10 +118,14 @@ async def cmd_start(message: Message):
                 if photo_id:
                     await message.answer_photo(
                         photo=photo_id,
-                        caption=text
+                        caption=text,
+                        reply_markup=delete_kb(post["post_id"]) if message.from_user.id == ADMIN_ID else None
                     )
                 else:
-                    await message.answer(text)
+                    await message.answer(
+                        text=text,
+                        reply_markup=delete_kb(post["post_id"]) if message.from_user.id == ADMIN_ID else None
+                    )
             except Exception as e:
                 logger.error(f"Ошибка отправки поста {post.get('post_id')}: {e}")
                 await message.answer(f"📄 {text[:300]}" + ("..." if len(text) > 300 else ""))
@@ -170,7 +200,7 @@ async def delete_post_callback(callback: types.CallbackQuery):
         if ws:
             records = ws.get_all_values()
             for idx, row in enumerate(records[1:], start=2):
-                if str(row[5]) == str(post_id):
+                if str(row[5]) == str(post_id):  # post_id в 6-м столбце
                     ws.delete_rows(idx)
                     await callback.message.delete()
                     await callback.answer("✅ Пост удален")
@@ -194,7 +224,7 @@ async def process_post_photo(message: Message, state: FSMContext):
         text = data.get("text", "")
         
         if message.photo:
-            photo_id = message.photo[-1].file_id  # Сохраняем file_id вместо URL
+            photo_id = message.photo[-1].file_id
         elif message.text and message.text.lower() == "пропустить":
             photo_id = ""
         else:
@@ -202,9 +232,34 @@ async def process_post_photo(message: Message, state: FSMContext):
             return
 
         if ws:
-            post_id = max([int(p.get("post_id", 0)) for p in ws.get_all_records()] + [0]) + 1
+            # Получаем всех пользователей
+            records = ws.get_all_records()
+            user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).strip()}
+            
+            # Добавляем новый пост
+            post_id = max([int(p.get("post_id", 0)) for p in records] + [0]) + 1
             ws.append_row(["", "", "", "", "", post_id, text, photo_id])
-            await message.answer(f"✅ Пост добавлен (ID: {post_id})")
+            
+            # Рассылаем пост всем пользователям
+            success = 0
+            for user_id in user_ids:
+                try:
+                    if photo_id:
+                        await bot.send_photo(
+                            chat_id=user_id,
+                            photo=photo_id,
+                            caption=text
+                        )
+                    else:
+                        await bot.send_message(
+                            chat_id=user_id,
+                            text=text
+                        )
+                    success += 1
+                except Exception as e:
+                    logger.error(f"Не удалось отправить пост пользователю {user_id}: {e}")
+
+            await message.answer(f"✅ Пост добавлен (ID: {post_id})\nОтправлено пользователям: {success}/{len(user_ids)}")
         else:
             await message.answer("⚠️ База данных недоступна, пост не сохранен")
             
