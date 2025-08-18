@@ -86,12 +86,12 @@ async def cmd_start(message: Message):
             
         for post in posts:
             text = post.get("post_text", "Без текста")
-            photo = post.get("post_photo", "").strip()
+            photo_id = post.get("post_photo", "").strip()
             
             try:
-                if photo:
+                if photo_id:
                     await message.answer_photo(
-                        photo=photo,
+                        photo=photo_id,
                         caption=text
                     )
                 else:
@@ -100,12 +100,9 @@ async def cmd_start(message: Message):
                 logger.error(f"Ошибка отправки поста {post.get('post_id')}: {e}")
                 await message.answer(f"📄 {text[:300]}" + ("..." if len(text) > 300 else ""))
                 
-    except gspread.exceptions.APIError as e:
-        logger.error(f"Ошибка Google Sheets: {e}")
-        await message.answer("⚠️ Ошибка загрузки данных. Попробуйте позже")
     except Exception as e:
-        logger.error(f"Неожиданная ошибка в /start: {e}")
-        await message.answer("❌ Произошла ошибка при загрузке постов")
+        logger.error(f"Ошибка в /start: {e}")
+        await message.answer("⚠️ Ошибка загрузки постов")
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
@@ -140,13 +137,13 @@ async def list_posts_callback(callback: types.CallbackQuery):
         
     for post in posts:
         text = post.get("post_text", "Без текста")
-        photo = post.get("post_photo", "").strip()
+        photo_id = post.get("post_photo", "").strip()
         post_id = post.get("post_id", "N/A")
         
         try:
-            if photo:
+            if photo_id:
                 await callback.message.answer_photo(
-                    photo,
+                    photo_id,
                     caption=f"{text}\n\nID: {post_id}",
                     reply_markup=delete_kb(post_id)
                 )
@@ -197,31 +194,17 @@ async def process_post_photo(message: Message, state: FSMContext):
         text = data.get("text", "")
         
         if message.photo:
-            file = await bot.get_file(message.photo[-1].file_id)
-            photo_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
+            photo_id = message.photo[-1].file_id  # Сохраняем file_id вместо URL
         elif message.text and message.text.lower() == "пропустить":
-            photo_url = ""
+            photo_id = ""
         else:
             await message.answer("❌ Отправьте фото или напишите 'пропустить'")
             return
 
         if ws:
             post_id = max([int(p.get("post_id", 0)) for p in ws.get_all_records()] + [0]) + 1
-            ws.append_row(["", "", "", "", "", post_id, text, photo_url])
+            ws.append_row(["", "", "", "", "", post_id, text, photo_id])
             await message.answer(f"✅ Пост добавлен (ID: {post_id})")
-            
-            # Рассылка всем пользователям
-            records = ws.get_all_records()
-            user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).isdigit()}
-            
-            for user_id in user_ids:
-                try:
-                    if photo_url:
-                        await bot.send_photo(chat_id=user_id, photo=photo_url, caption=text)
-                    else:
-                        await bot.send_message(chat_id=user_id, text=text)
-                except Exception as e:
-                    logger.error(f"Не удалось отправить пост {post_id} пользователю {user_id}: {e}")
         else:
             await message.answer("⚠️ База данных недоступна, пост не сохранен")
             
