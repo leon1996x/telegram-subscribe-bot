@@ -77,22 +77,22 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
             if ':' in button:
                 parts = button.split(':')
                 if len(parts) >= 4:
-                    # Формат: тип:текст:цена:дни/файл
+                    # Формат: тип:текст:цена:дни/файл/url
                     btn_type, text, price, extra = parts[0], parts[1], parts[2], parts[3]
                     
                     if btn_type == "file":
                         # Для файлов используем короткий идентификатор (хэш)
-                        short_id = hash(extra) % 10000  # Создаем короткий ID
-                        callback_data = f"file:{price}:{short_id}"
+                        short_id = hash(extra) % 10000
+                        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"file:{price}:{short_id}")])
+                    
                     elif btn_type == "channel":
                         # Для каналов
-                        callback_data = f"chan:{price}:{extra}"
-                    elif btn_type == "url":
-                        # Для URL кнопок используем обычные URL кнопки
-                        keyboard.append([InlineKeyboardButton(text=text, url=extra)])
-                        continue
+                        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"chan:{price}:{extra}")])
                     
-                    keyboard.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
+                    elif btn_type == "url":
+                        # ДЛЯ URL КНОПОК ИСПОЛЬЗУЕМ url, А НЕ callback_data!
+                        keyboard.append([InlineKeyboardButton(text=text, url=extra)])
+                        
     except Exception as e:
         logger.error(f"Ошибка создания клавиатуры: {e}")
         return None
@@ -431,13 +431,14 @@ async def process_button_url(message: Message, state: FSMContext):
             await message.answer("❌ URL должен начинаться с http:// или https://")
             return
         
-        # Добавляем кнопку в список
+        # Добавляем кнопку в список (правильный формат)
         data = await state.get_data()
         buttons_data = data.get("buttons_data", [])
         btn_type = data.get("current_button_type")
         text = data.get("current_button_text")
         
-        buttons_data.append(f"{btn_type}:{text}:::{url}")
+        # Сохраняем в формате: url:текст:0:url_адрес
+        buttons_data.append(f"{btn_type}:{text}:0:{url}")
         await state.update_data(buttons_data=buttons_data)
         
         # Возвращаемся к выбору типа
