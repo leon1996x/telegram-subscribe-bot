@@ -75,8 +75,21 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
         buttons = buttons_data.split('|')
         for button in buttons:
             if ':' in button:
-                text, url = button.split(':', 1)
-                keyboard.append([InlineKeyboardButton(text=text.strip(), url=url.strip())])
+                parts = button.split(':')
+                if len(parts) >= 4:
+                    # Формат: тип:текст:цена:дни/файл
+                    btn_type, text, price, extra = parts[0], parts[1], parts[2], parts[3]
+                    if btn_type == "file":
+                        # Кнопка для продажи файла
+                        callback_data = f"buy_file:{price}:{extra}"
+                    elif btn_type == "channel":
+                        # Кнопка для доступа в канал
+                        callback_data = f"buy_channel:{price}:{extra}"
+                    elif btn_type == "url":
+                        # Обычная URL кнопка
+                        callback_data = f"url:{extra}"
+                    
+                    keyboard.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
     except Exception as e:
         logger.error(f"Ошибка создания клавиатуры: {e}")
         return None
@@ -88,8 +101,11 @@ class PostStates(StatesGroup):
     waiting_text = State()
     waiting_photo = State()
     waiting_buttons_choice = State()
-    waiting_buttons_count = State()
+    waiting_button_type = State()
     waiting_button_text = State()
+    waiting_button_price = State()
+    waiting_button_file = State()
+    waiting_button_days = State()
     waiting_button_url = State()
 
 # Регистрация пользователя
@@ -277,40 +293,131 @@ async def process_buttons_choice(callback: types.CallbackQuery, state: FSMContex
             await state.update_data(buttons="нет")
             await process_final_post(callback.message, state)
         else:
-            # Запрашиваем количество кнопок
-            await state.set_state(PostStates.waiting_buttons_count)
-            await callback.message.answer("🔢 Сколько кнопок хотите добавить? (1-10):", reply_markup=ReplyKeyboardRemove())
+            # Предлагаем выбрать тип кнопки
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
+                [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
+                [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
+                [InlineKeyboardButton(text="✅ Готово", callback_data="buttons_done")]
+            ])
+            await state.set_state(PostStates.waiting_button_type)
+            await state.update_data(buttons_data=[])
+            await callback.message.answer("🎛 Выберите тип кнопки:", reply_markup=keyboard)
         
         await callback.answer()
     except Exception as e:
         logger.error(f"Ошибка выбора кнопок: {e}")
         await callback.message.answer("❌ Ошибка")
 
-@dp.message(PostStates.waiting_buttons_count)
-async def process_buttons_count(message: Message, state: FSMContext):
+@dp.callback_query(PostStates.waiting_button_type, F.data.startswith("button_type_"))
+async def process_button_type(callback: types.CallbackQuery, state: FSMContext):
     try:
-        count = int(message.text)
-        if 1 <= count <= 10:
-            await state.update_data(buttons_count=count, buttons_data=[])
+        btn_type = callback.data.split("_")[2]
+        await state.update_data(current_button_type=btn_type)
+        
+        if btn_type in ["file", "channel", "url"]:
             await state.set_state(PostStates.waiting_button_text)
-            await message.answer(f"📝 Введите текст для кнопки 1:")
-        else:
-            await message.answer("❌ Введите число от 1 до 10:")
-    except ValueError:
-        await message.answer("❌ Введите корректное число:")
+            await callback.message.answer("📝 Введите текст для кнопки:")
+        elif btn_type == "done":
+            await process_final_post(callback.message, state)
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка выбора типа: {e}")
+        await callback.message.answer("❌ Ошибка")
 
 @dp.message(PostStates.waiting_button_text)
 async def process_button_text(message: Message, state: FSMContext):
     try:
-        data = await state.get_data()
-        buttons_data = data.get("buttons_data", [])
-        current_index = len(buttons_data)
-        
         await state.update_data(current_button_text=message.text)
-        await state.set_state(PostStates.waiting_button_url)
-        await message.answer(f"🔗 Введите URL для кнопки {current_index + 1}:\n(начинается с http:// или https://)")
+        data = await state.get_data()
+        btn_type = data.get("current_button_type")
+        
+        if btn_type in ["file", "channel"]:
+            await state.set_state(PostStates.waiting_button_price)
+            await message.answer("💰 Введите цену в рублях:")
+        elif btn_type == "url":
+            await state.set_state(PostStates.waiting_button_url)
+            await message.answer("🔗 Введите URL:")
+            
     except Exception as e:
         logger.error(f"Ошибка текста кнопки: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_price)
+async def process_button_price(message: Message, state: FSMContext):
+    try:
+        price = message.text.strip()
+        if not price.isdigit():
+            await message.answer("❌ Введите корректную цену (число):")
+            return
+            
+        await state.update_data(current_button_price=price)
+        data = await state.get_data()
+        btn_type = data.get("current_button_type")
+        
+        if btn_type == "file":
+            await state.set_state(PostStates.waiting_button_file)
+            await message.answer("📎 Отправьте файл для продажи:")
+        elif btn_type == "channel":
+            await state.set_state(PostStates.waiting_button_days)
+            await message.answer("📅 Введите количество дней доступа (или 'навсегда'):")
+            
+    except Exception as e:
+        logger.error(f"Ошибка цены: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_file)
+async def process_button_file(message: Message, state: FSMContext):
+    try:
+        if not (message.document or message.photo):
+            await message.answer("❌ Отправьте файл или фото:")
+            return
+            
+        file_id = message.document.file_id if message.document else message.photo[-1].file_id
+        await state.update_data(current_button_file=file_id)
+        
+        # Добавляем кнопку в список
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        btn_type = data.get("current_button_type")
+        text = data.get("current_button_text")
+        price = data.get("current_button_price")
+        file_id = data.get("current_button_file")
+        
+        buttons_data.append(f"{btn_type}:{text}:{price}:{file_id}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка файла: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_days)
+async def process_button_days(message: Message, state: FSMContext):
+    try:
+        days = message.text.strip()
+        if days.lower() != "навсегда" and not days.isdigit():
+            await message.answer("❌ Введите число дней или 'навсегда':")
+            return
+            
+        # Добавляем кнопку в список
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        btn_type = data.get("current_button_type")
+        text = data.get("current_button_text")
+        price = data.get("current_button_price")
+        
+        buttons_data.append(f"{btn_type}:{text}:{price}:{days}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка дней: {e}")
         await message.answer("❌ Ошибка")
 
 @dp.message(PostStates.waiting_button_url)
@@ -321,28 +428,32 @@ async def process_button_url(message: Message, state: FSMContext):
             await message.answer("❌ URL должен начинаться с http:// или https://")
             return
         
+        # Добавляем кнопку в список
         data = await state.get_data()
-        button_text = data.get("current_button_text")
         buttons_data = data.get("buttons_data", [])
-        buttons_count = data.get("buttons_count", 1)
+        btn_type = data.get("current_button_type")
+        text = data.get("current_button_text")
         
-        # Добавляем кнопку в формате "Текст:URL"
-        buttons_data.append(f"{button_text}:{url}")
+        buttons_data.append(f"{btn_type}:{text}:::{url}")
         await state.update_data(buttons_data=buttons_data)
         
-        current_index = len(buttons_data)
-        if current_index < buttons_count:
-            await state.set_state(PostStates.waiting_button_text)
-            await message.answer(f"📝 Введите текст для кнопки {current_index + 1}:")
-        else:
-            # Все кнопки добавлены
-            buttons_str = "|".join(buttons_data)
-            await state.update_data(buttons=buttons_str)
-            await process_final_post(message, state)
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
             
     except Exception as e:
-        logger.error(f"Ошибка URL кнопки: {e}")
+        logger.error(f"Ошибка URL: {e}")
         await message.answer("❌ Ошибка")
+
+async def offer_more_buttons(message: Message, state: FSMContext):
+    """Предлагает добавить еще кнопки"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
+        [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
+        [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
+        [InlineKeyboardButton(text="✅ Готово", callback_data="button_type_done")]
+    ])
+    await state.set_state(PostStates.waiting_button_type)
+    await message.answer("🎛 Добавить еще кнопку или завершить?", reply_markup=keyboard)
 
 async def process_final_post(message: Message, state: FSMContext):
     """Финальное сохранение поста"""
@@ -350,7 +461,7 @@ async def process_final_post(message: Message, state: FSMContext):
         data = await state.get_data()
         text = data.get("text", "")
         photo_id = data.get("photo_id", "")
-        buttons = data.get("buttons", "нет")
+        buttons_data = data.get("buttons_data", [])
         
         if ws:
             records = ws.get_all_records()
@@ -368,10 +479,11 @@ async def process_final_post(message: Message, state: FSMContext):
             user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).strip()}
             
             # Сохраняем в таблицу
-            ws.append_row(["", "", "", "", "", post_id, text, photo_id, buttons])
+            buttons_str = "|".join(buttons_data) if buttons_data else "нет"
+            ws.append_row(["", "", "", "", "", post_id, text, photo_id, buttons_str])
             
             # Создаем клавиатуру для рассылки
-            keyboard = create_buttons_keyboard(buttons)
+            keyboard = create_buttons_keyboard(buttons_str)
             
             # Рассылаем пост
             success = 0
@@ -396,7 +508,7 @@ async def process_final_post(message: Message, state: FSMContext):
 
             await message.answer(
                 f"✅ Пост добавлен (ID: {post_id})\n"
-                f"Кнопки: {buttons if buttons != 'нет' else 'отсутствуют'}\n"
+                f"Кнопки: {len(buttons_data)} шт.\n"
                 f"Отправлено: {success}/{len(user_ids)}"
             )
         else:
