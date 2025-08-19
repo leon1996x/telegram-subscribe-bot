@@ -1,12 +1,13 @@
 import os
 import logging
-from typing import List, Optional
+import re
+from typing import List, Optional, Dict
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.filters import Command
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -30,7 +31,7 @@ if not all([BOT_TOKEN, GSHEET_ID]):
     missing = [name for name, val in [("BOT_TOKEN", BOT_TOKEN), ("GSHEET_ID", GSHEET_ID)] if not val]
     raise RuntimeError(f"Не заданы: {', '.join(missing)}")
 
-# Инициализация бота (исправленная версия)
+# Инициализация бота
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
@@ -64,10 +65,32 @@ def delete_kb(post_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{post_id}")]
     ])
 
+def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]:
+    """Создает клавиатуру из данных кнопок"""
+    if not buttons_data or buttons_data == "нет":
+        return None
+    
+    keyboard = []
+    try:
+        buttons = buttons_data.split('|')
+        for button in buttons:
+            if ':' in button:
+                text, url = button.split(':', 1)
+                keyboard.append([InlineKeyboardButton(text=text.strip(), url=url.strip())])
+    except Exception as e:
+        logger.error(f"Ошибка создания клавиатуры: {e}")
+        return None
+    
+    return InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
+
 # Состояния FSM
 class PostStates(StatesGroup):
     waiting_text = State()
     waiting_photo = State()
+    waiting_buttons_choice = State()
+    waiting_buttons_count = State()
+    waiting_button_text = State()
+    waiting_button_url = State()
 
 # Регистрация пользователя
 async def register_user(user: types.User):
@@ -91,7 +114,8 @@ async def register_user(user: types.User):
                 "",  # subscription_end
                 "",  # post_id
                 "",  # post_text
-                ""   # post_photo
+                "",  # post_photo
+                ""   # post_buttons
             ])
             logger.info(f"Зарегистрирован новый пользователь: {user_id}")
     except Exception as e:
@@ -112,18 +136,21 @@ async def cmd_start(message: Message):
         for post in posts:
             text = post.get("post_text", "Без текста")
             photo_id = post.get("post_photo", "").strip()
+            buttons_data = post.get("post_buttons", "").strip()
+            
+            keyboard = create_buttons_keyboard(buttons_data)
             
             try:
                 if photo_id:
                     await message.answer_photo(
                         photo=photo_id,
                         caption=text,
-                        reply_markup=delete_kb(post["post_id"]) if message.from_user.id == ADMIN_ID else None
+                        reply_markup=keyboard if keyboard else (delete_kb(post["post_id"]) if message.from_user.id == ADMIN_ID else None)
                     )
                 else:
                     await message.answer(
                         text=text,
-                        reply_markup=delete_kb(post["post_id"]) if message.from_user.id == ADMIN_ID else None
+                        reply_markup=keyboard if keyboard else (delete_kb(post["post_id"]) if message.from_user.id == ADMIN_ID else None)
                     )
             except Exception as e:
                 logger.error(f"Ошибка отправки поста {post.get('post_id')}: {e}")
@@ -168,21 +195,24 @@ async def list_posts_callback(callback: types.CallbackQuery):
         text = post.get("post_text", "Без текста")
         photo_id = post.get("post_photo", "").strip()
         post_id = post.get("post_id", "N/A")
+        buttons_data = post.get("post_buttons", "").strip()
+        
+        keyboard = create_buttons_keyboard(buttons_data)
         
         try:
             if photo_id:
                 await callback.message.answer_photo(
                     photo_id,
-                    caption=f"{text}\n\nID: {post_id}",
-                    reply_markup=delete_kb(post_id))
+                    caption=f"{text}\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
+                    reply_markup=keyboard if keyboard else delete_kb(post_id))
             else:
                 await callback.message.answer(
-                    f"{text}\n\nID: {post_id}",
-                    reply_markup=delete_kb(post_id))
+                    f"{text}\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
+                    reply_markup=keyboard if keyboard else delete_kb(post_id))
         except Exception as e:
             logger.error(f"Ошибка отправки поста {post_id}: {e}")
             await callback.message.answer(
-                f"📄 {text[:300]}...\n\nID: {post_id}",
+                f"📄 {text[:300]}...\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
                 reply_markup=delete_kb(post_id))
     await callback.answer()
 
@@ -212,22 +242,116 @@ async def delete_post_callback(callback: types.CallbackQuery):
 async def process_post_text(message: Message, state: FSMContext):
     await state.update_data(text=message.text)
     await state.set_state(PostStates.waiting_photo)
-    await message.answer("📷 Отправьте фото или напишите 'пропустить'")
+    await message.answer("📷 Отправьте фото или напишите 'пропустить':")
 
 @dp.message(PostStates.waiting_photo)
 async def process_post_photo(message: Message, state: FSMContext):
     try:
-        data = await state.get_data()
-        text = data.get("text", "")
-        
         if message.photo:
-            photo_id = message.photo[-1].file_id
+            await state.update_data(photo_id=message.photo[-1].file_id)
         elif message.text and message.text.lower() == "пропустить":
-            photo_id = ""
+            await state.update_data(photo_id="")
         else:
             await message.answer("❌ Отправьте фото или напишите 'пропустить'")
             return
 
+        # Предлагаем добавить кнопки
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да", callback_data="add_buttons_yes")],
+            [InlineKeyboardButton(text="❌ Нет", callback_data="add_buttons_no")]
+        ])
+        
+        await state.set_state(PostStates.waiting_buttons_choice)
+        await message.answer("📌 Хотите добавить кнопки к посту?", reply_markup=keyboard)
+            
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {e}")
+        await message.answer("❌ Ошибка обработки")
+        await state.clear()
+
+@dp.callback_query(PostStates.waiting_buttons_choice, F.data.in_(["add_buttons_yes", "add_buttons_no"]))
+async def process_buttons_choice(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        if callback.data == "add_buttons_no":
+            # Сохраняем пост без кнопок
+            await state.update_data(buttons="нет")
+            await process_final_post(callback.message, state)
+        else:
+            # Запрашиваем количество кнопок
+            await state.set_state(PostStates.waiting_buttons_count)
+            await callback.message.answer("🔢 Сколько кнопок хотите добавить? (1-10):", reply_markup=ReplyKeyboardRemove())
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка выбора кнопок: {e}")
+        await callback.message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_buttons_count)
+async def process_buttons_count(message: Message, state: FSMContext):
+    try:
+        count = int(message.text)
+        if 1 <= count <= 10:
+            await state.update_data(buttons_count=count, buttons_data=[])
+            await state.set_state(PostStates.waiting_button_text)
+            await message.answer(f"📝 Введите текст для кнопки 1:")
+        else:
+            await message.answer("❌ Введите число от 1 до 10:")
+    except ValueError:
+        await message.answer("❌ Введите корректное число:")
+
+@dp.message(PostStates.waiting_button_text)
+async def process_button_text(message: Message, state: FSMContext):
+    try:
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        current_index = len(buttons_data)
+        
+        await state.update_data(current_button_text=message.text)
+        await state.set_state(PostStates.waiting_button_url)
+        await message.answer(f"🔗 Введите URL для кнопки {current_index + 1}:\n(начинается с http:// или https://)")
+    except Exception as e:
+        logger.error(f"Ошибка текста кнопки: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_url)
+async def process_button_url(message: Message, state: FSMContext):
+    try:
+        url = message.text.strip()
+        if not (url.startswith('http://') or url.startswith('https://')):
+            await message.answer("❌ URL должен начинаться с http:// или https://")
+            return
+        
+        data = await state.get_data()
+        button_text = data.get("current_button_text")
+        buttons_data = data.get("buttons_data", [])
+        buttons_count = data.get("buttons_count", 1)
+        
+        # Добавляем кнопку в формате "Текст:URL"
+        buttons_data.append(f"{button_text}:{url}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        current_index = len(buttons_data)
+        if current_index < buttons_count:
+            await state.set_state(PostStates.waiting_button_text)
+            await message.answer(f"📝 Введите текст для кнопки {current_index + 1}:")
+        else:
+            # Все кнопки добавлены
+            buttons_str = "|".join(buttons_data)
+            await state.update_data(buttons=buttons_str)
+            await process_final_post(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка URL кнопки: {e}")
+        await message.answer("❌ Ошибка")
+
+async def process_final_post(message: Message, state: FSMContext):
+    """Финальное сохранение поста"""
+    try:
+        data = await state.get_data()
+        text = data.get("text", "")
+        photo_id = data.get("photo_id", "")
+        buttons = data.get("buttons", "нет")
+        
         if ws:
             records = ws.get_all_records()
             
@@ -242,20 +366,39 @@ async def process_post_photo(message: Message, state: FSMContext):
             post_id = max(post_ids + [0]) + 1
             
             user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).strip()}
-            ws.append_row(["", "", "", "", "", post_id, text, photo_id])
             
+            # Сохраняем в таблицу
+            ws.append_row(["", "", "", "", "", post_id, text, photo_id, buttons])
+            
+            # Создаем клавиатуру для рассылки
+            keyboard = create_buttons_keyboard(buttons)
+            
+            # Рассылаем пост
             success = 0
             for user_id in user_ids:
                 try:
                     if photo_id:
-                        await bot.send_photo(user_id, photo=photo_id, caption=text)
+                        await bot.send_photo(
+                            user_id, 
+                            photo=photo_id, 
+                            caption=text,
+                            reply_markup=keyboard
+                        )
                     else:
-                        await bot.send_message(user_id, text=text)
+                        await bot.send_message(
+                            user_id, 
+                            text=text,
+                            reply_markup=keyboard
+                        )
                     success += 1
                 except Exception as e:
                     logger.error(f"Не удалось отправить пост пользователю {user_id}: {e}")
 
-            await message.answer(f"✅ Пост добавлен (ID: {post_id})\nОтправлено: {success}/{len(user_ids)}")
+            await message.answer(
+                f"✅ Пост добавлен (ID: {post_id})\n"
+                f"Кнопки: {buttons if buttons != 'нет' else 'отсутствуют'}\n"
+                f"Отправлено: {success}/{len(user_ids)}"
+            )
         else:
             await message.answer("⚠️ База данных недоступна")
             
