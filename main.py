@@ -30,10 +30,11 @@ if not all([BOT_TOKEN, GSHEET_ID]):
     missing = [name for name, val in [("BOT_TOKEN", BOT_TOKEN), ("GSHEET_ID", GSHEET_ID)] if not val]
     raise RuntimeError(f"Не заданы: {', '.join(missing)}")
 
-# Инициализация бота
+# Инициализация бота (исправленная версия)
 bot = Bot(
     token=BOT_TOKEN,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 dp = Dispatcher(storage=MemoryStorage())
 app = FastAPI()
 
@@ -81,7 +82,6 @@ async def register_user(user: types.User):
 
         records = ws.get_all_records()
         
-        # Проверяем, есть ли уже пользователь
         if not any(str(r.get("id", "")).strip() == user_id for r in records):
             ws.append_row([
                 user_id,
@@ -174,7 +174,7 @@ async def list_posts_callback(callback: types.CallbackQuery):
                 await callback.message.answer_photo(
                     photo_id,
                     caption=f"{text}\n\nID: {post_id}",
-                    reply_markup=delete_kb(post_id)
+                    reply_markup=delete_kb(post_id))
             else:
                 await callback.message.answer(
                     f"{text}\n\nID: {post_id}",
@@ -231,7 +231,6 @@ async def process_post_photo(message: Message, state: FSMContext):
         if ws:
             records = ws.get_all_records()
             
-            # Безопасное вычисление post_id
             post_ids = []
             for p in records:
                 try:
