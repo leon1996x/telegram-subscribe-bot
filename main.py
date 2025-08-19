@@ -79,15 +79,18 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                 if len(parts) >= 4:
                     # Формат: тип:текст:цена:дни/файл
                     btn_type, text, price, extra = parts[0], parts[1], parts[2], parts[3]
+                    
                     if btn_type == "file":
-                        # Кнопка для продажи файла
-                        callback_data = f"buy_file:{price}:{extra}"
+                        # Для файлов используем короткий идентификатор (хэш)
+                        short_id = hash(extra) % 10000  # Создаем короткий ID
+                        callback_data = f"file:{price}:{short_id}"
                     elif btn_type == "channel":
-                        # Кнопка для доступа в канал
-                        callback_data = f"buy_channel:{price}:{extra}"
+                        # Для каналов
+                        callback_data = f"chan:{price}:{extra}"
                     elif btn_type == "url":
-                        # Обычная URL кнопка
-                        callback_data = f"url:{extra}"
+                        # Для URL кнопок используем обычные URL кнопки
+                        keyboard.append([InlineKeyboardButton(text=text, url=extra)])
+                        continue
                     
                     keyboard.append([InlineKeyboardButton(text=text, callback_data=callback_data)])
     except Exception as e:
