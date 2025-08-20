@@ -74,24 +74,28 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
     try:
         buttons = buttons_data.split('|')
         for button in buttons:
-            if ':' in button:
+            # Для URL кнопок используем формат: url|текст|url_адрес
+            if button.startswith('url|'):
+                parts = button.split('|')
+                if len(parts) >= 3:
+                    btn_type, text, url = parts[0], parts[1], '|'.join(parts[2:])
+                    if url.startswith(('http://', 'https://')):
+                        keyboard.append([InlineKeyboardButton(text=text, url=url)])
+                    else:
+                        logger.error(f"Invalid URL: {url}")
+            
+            # Для остальных кнопок используем старый формат с :
+            elif ':' in button:
                 parts = button.split(':')
                 if len(parts) >= 4:
-                    # Формат: тип:текст:цена:дни/файл/url
                     btn_type, text, price, extra = parts[0], parts[1], parts[2], parts[3]
                     
                     if btn_type == "file":
-                        # Для файлов используем короткий идентификатор (хэш)
                         short_id = hash(extra) % 10000
                         keyboard.append([InlineKeyboardButton(text=text, callback_data=f"file:{price}:{short_id}")])
                     
                     elif btn_type == "channel":
-                        # Для каналов
                         keyboard.append([InlineKeyboardButton(text=text, callback_data=f"chan:{price}:{extra}")])
-                    
-                    elif btn_type == "url":
-                        # ДЛЯ URL КНОПОК ИСПОЛЬЗУЕМ url, А НЕ callback_data!
-                        keyboard.append([InlineKeyboardButton(text=text, url=extra)])
                         
     except Exception as e:
         logger.error(f"Ошибка создания клавиатуры: {e}")
@@ -431,14 +435,14 @@ async def process_button_url(message: Message, state: FSMContext):
             await message.answer("❌ URL должен начинаться с http:// или https://")
             return
         
-        # Добавляем кнопку в список (правильный формат)
+        # Добавляем кнопку в список с другим разделителем
         data = await state.get_data()
         buttons_data = data.get("buttons_data", [])
         btn_type = data.get("current_button_type")
         text = data.get("current_button_text")
         
-        # Сохраняем в формате: url:текст:0:url_адрес
-        buttons_data.append(f"{btn_type}:{text}:0:{url}")
+        # Используем другой формат: url|текст|url_адрес
+        buttons_data.append(f"{btn_type}|{text}|{url}")
         await state.update_data(buttons_data=buttons_data)
         
         # Возвращаемся к выбору типа
@@ -482,7 +486,7 @@ async def process_final_post(message: Message, state: FSMContext):
             
             user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).strip()}
             
-            # Сохраняем в таблицу
+            # Сохраняем в таблицу (объединяем через |)
             buttons_str = "|".join(buttons_data) if buttons_data else "нет"
             ws.append_row(["", "", "", "", "", post_id, text, photo_id, buttons_str])
             
