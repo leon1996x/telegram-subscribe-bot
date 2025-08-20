@@ -48,6 +48,7 @@ app = FastAPI()
 
 # Хранилище оплаченных файлов
 paid_files = {}
+file_id_mapping = {}  # Маппинг short_id -> file_id
 
 # === Загрузка/сохранение оплаченных файлов ===
 def load_paid_files():
@@ -201,15 +202,18 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                 else:
                     logger.error(f"Invalid URL: {url}")
             
-            # Для файловых кнопок используем формат: file|текст|цена|file_id
+            # Для файловых кнопок используем формат: file|текст|цена|short_id
             elif button == "file" and i + 3 < len(buttons):
                 logger.info("Обнаружена файловая кнопка")
                 text = buttons[i + 1]
                 price = buttons[i + 2]
-                file_id = buttons[i + 3]
-                logger.info(f"Текст: {text}, Цена: {price}, File ID: {file_id}")
+                short_id = buttons[i + 3]
+                logger.info(f"Текст: {text}, Цена: {price}, Short ID: {short_id}")
                 
-                keyboard.append([InlineKeyboardButton(text=f"{text} - {price}₽", callback_data=f"buy_file:{file_id}:{price}")])
+                keyboard.append([InlineKeyboardButton(
+                    text=f"{text} - {price}₽", 
+                    callback_data=f"buy_file:{short_id}:{price}"
+                )])
                 i += 4  # Пропускаем 4 элемента
                 continue
             
@@ -223,7 +227,13 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                     btn_type, text, price, extra = parts[0], parts[1], parts[2], parts[3]
                     
                     if btn_type == "file":
-                        keyboard.append([InlineKeyboardButton(text=f"{text} - {price}₽", callback_data=f"buy_file:{extra}:{price}")])
+                        # Генерируем короткий ID для callback_data
+                        short_id = hash(extra) % 10000
+                        file_id_mapping[str(short_id)] = extra
+                        keyboard.append([InlineKeyboardButton(
+                            text=f"{text} - {price}₽", 
+                            callback_data=f"buy_file:{short_id}:{price}"
+                        )])
                         logger.info(f"Добавлена файловая кнопка: {text}")
                     
                     elif btn_type == "channel":
@@ -332,15 +342,21 @@ async def cmd_admin(message: Message):
 @dp.callback_query(F.data.startswith("buy_file:"))
 async def buy_file_callback(callback: types.CallbackQuery):
     try:
-        # Разбираем данные кнопки: buy_file:file_id:price
+        # Разбираем данные кнопки: buy_file:short_id:price
         parts = callback.data.split(':')
         if len(parts) < 3:
             await callback.answer("❌ Ошибка формата кнопки")
             return
             
-        file_id = parts[1]
+        short_id = parts[1]
         price = parts[2]
         user_id = str(callback.from_user.id)
+        
+        # Находим file_id по short_id
+        file_id = file_id_mapping.get(short_id)
+        if not file_id:
+            await callback.answer("❌ Файл не найден")
+            return
         
         # Проверяем, есть ли уже доступ к файлу
         if user_id in paid_files and file_id in paid_files[user_id]:
@@ -574,8 +590,12 @@ async def process_button_file(message: Message, state: FSMContext):
         price = data.get("current_button_price")
         file_id = data.get("current_button_file")
         
-        # Используем новый формат: file|текст|цена|file_id
-        buttons_data.append(f"file|{text}|{price}|{file_id}")
+        # Генерируем короткий ID и сохраняем маппинг
+        short_id = hash(file_id) % 10000
+        file_id_mapping[str(short_id)] = file_id
+        
+        # Используем новый формат: file|текст|цена|short_id
+        buttons_data.append(f"file|{text}|{price}|{short_id}")
         await state.update_data(buttons_data=buttons_data)
         
         # Возвращаемся к выбору типа
