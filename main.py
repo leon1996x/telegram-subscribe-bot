@@ -1,6 +1,28 @@
 import os
 import json
-import getenv("GSHEET_ID")
+import logging
+import re
+import threading
+import time
+from datetime import datetime, timedelta
+from urllib.parse import unquote
+from typing import List, Optional, Dict
+from fastapi import FastAPI, Request
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import Command
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
+import gspread
+from google.oauth2.service_account import Credentials
+
+# === CONFIG ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
+GSHEET_ID = os.getenv("GSHEET_ID")
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 USERS_FILE = "paid_users.json"
 
