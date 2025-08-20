@@ -73,27 +73,50 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
     
     keyboard = []
     try:
+        # Автоматически исправляем старый формат данных
+        if "url" in buttons_data and "https://" in buttons_data and "|" not in buttons_data:
+            logger.info("Обнаружен старый формат данных, исправляем...")
+            parts = buttons_data.split('\n')
+            url_parts = []
+            for part in parts:
+                if part.strip() and part != "url":
+                    url_parts.append(part.strip())
+            
+            if len(url_parts) >= 2:
+                text, url = url_parts[0], url_parts[1]
+                if url.startswith(('http://', 'https://')):
+                    buttons_data = f"url|{text}|{url}"
+                    logger.info(f"Исправленный формат: {buttons_data}")
+                else:
+                    # Ищем URL в оставшихся частях
+                    for url_part in url_parts:
+                        if url_part.startswith(('http://', 'https://')):
+                            buttons_data = f"url|{text}|{url_part}"
+                            logger.info(f"Исправленный формат: {buttons_data}")
+                            break
+        
         buttons = buttons_data.split('|')
         logger.info(f"Разделенные кнопки: {buttons}")
         
-        for button in buttons:
-            logger.info(f"Обрабатываю кнопку: {button}")
+        i = 0
+        while i < len(buttons):
+            button = buttons[i]
+            logger.info(f"Обрабатываю кнопку [{i}]: {button}")
             
             # Для URL кнопок используем формат: url|текст|url_адрес
-            if button.startswith('url|'):
+            if button == "url" and i + 2 < len(buttons):
                 logger.info("Обнаружена URL кнопка")
-                parts = button.split('|')
-                logger.info(f"Части URL кнопки: {parts}")
+                text = buttons[i + 1]
+                url = buttons[i + 2]
+                logger.info(f"Текст: {text}, URL: {url}")
                 
-                if len(parts) >= 3:
-                    text, url = parts[1], '|'.join(parts[2:])
-                    logger.info(f"Текст: {text}, URL: {url}")
-                    
-                    if url.startswith(('http://', 'https://')):
-                        keyboard.append([InlineKeyboardButton(text=text, url=url)])
-                        logger.info(f"Добавлена URL кнопка: {text} -> {url}")
-                    else:
-                        logger.error(f"Invalid URL: {url}")
+                if url.startswith(('http://', 'https://')):
+                    keyboard.append([InlineKeyboardButton(text=text, url=url)])
+                    logger.info(f"Добавлена URL кнопка: {text} -> {url}")
+                    i += 3  # Пропускаем 3 элемента: url, текст, url
+                    continue
+                else:
+                    logger.error(f"Invalid URL: {url}")
             
             # Для остальных кнопок используем старый формат с :
             elif ':' in button:
@@ -112,6 +135,8 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                     elif btn_type == "channel":
                         keyboard.append([InlineKeyboardButton(text=text, callback_data=f"chan:{price}:{extra}")])
                         logger.info(f"Добавлена канальная кнопка: {text}")
+            
+            i += 1  # Переходим к следующему элементу
                         
     except Exception as e:
         logger.error(f"Ошибка создания клавиатуры: {e}", exc_info=True)
