@@ -78,7 +78,7 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
             if button.startswith('url|'):
                 parts = button.split('|')
                 if len(parts) >= 3:
-                    btn_type, text, url = parts[0], parts[1], '|'.join(parts[2:])
+                    text, url = parts[1], '|'.join(parts[2:])
                     if url.startswith(('http://', 'https://')):
                         keyboard.append([InlineKeyboardButton(text=text, url=url)])
                     else:
@@ -305,7 +305,7 @@ async def process_buttons_choice(callback: types.CallbackQuery, state: FSMContex
                 [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
                 [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
                 [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
-                [InlineKeyboardButton(text="✅ Готово", callback_data="buttons_done")]
+                [InlineKeyboardButton(text="✅ Готово", callback_data="button_type_done")]
             ])
             await state.set_state(PostStates.waiting_button_type)
             await state.update_data(buttons_data=[])
@@ -435,14 +435,13 @@ async def process_button_url(message: Message, state: FSMContext):
             await message.answer("❌ URL должен начинаться с http:// или https://")
             return
         
-        # Добавляем кнопку в список с другим разделителем
+        # Добавляем кнопку в список
         data = await state.get_data()
         buttons_data = data.get("buttons_data", [])
-        btn_type = data.get("current_button_type")
         text = data.get("current_button_text")
         
-        # Используем другой формат: url|текст|url_адрес
-        buttons_data.append(f"{btn_type}|{text}|{url}")
+        # Правильный формат: url|текст|url_адрес
+        buttons_data.append(f"url|{text}|{url}")
         await state.update_data(buttons_data=buttons_data)
         
         # Возвращаемся к выбору типа
@@ -462,6 +461,12 @@ async def offer_more_buttons(message: Message, state: FSMContext):
     ])
     await state.set_state(PostStates.waiting_button_type)
     await message.answer("🎛 Добавить еще кнопку или завершить?", reply_markup=keyboard)
+
+@dp.callback_query(PostStates.waiting_button_type, F.data == "button_type_done")
+async def process_buttons_done(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка завершения добавления кнопок"""
+    await process_final_post(callback.message, state)
+    await callback.answer()
 
 async def process_final_post(message: Message, state: FSMContext):
     """Финальное сохранение поста"""
