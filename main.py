@@ -1,6 +1,11 @@
 import os
+import json
 import logging
 import re
+import threading
+import time
+from datetime import datetime, timedelta
+from urllib.parse import unquote
 from typing import List, Optional, Dict
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, types, F
@@ -14,22 +19,24 @@ from aiogram.fsm.storage.memory import MemoryStorage
 import gspread
 from google.oauth2.service_account import Credentials
 
+# === CONFIG ===
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
+GSHEET_ID = os.getenv("GSHEET_ID")
+PAYFORM_URL = "https://menyayrealnost.payform.ru"
+USERS_FILE = "paid_users.json"
+
+# Проверка переменных
+if not all([BOT_TOKEN, GSHEET_ID]):
+    missing = [name for name, val in [("BOT_TOKEN", BOT_TOKEN), ("GSHEET_ID", GSHEET_ID)] if not val]
+    raise RuntimeError(f"Не заданы: {', '.join(missing)}")
+
 # Настройка логгирования
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-# Конфигурация
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
-GSHEET_ID = os.getenv("GSHEET_ID")
-
-# Проверка переменных
-if not all([BOT_TOKEN, GSHEET_ID]):
-    missing = [name for name, val in [("BOT_TOKEN", BOT_TOKEN), ("GSHEET_ID", GSHEET_ID)] if not val]
-    raise RuntimeError(f"Не заданы: {', '.join(missing)}")
 
 # Инициализация бота
 bot = Bot(
@@ -38,6 +45,82 @@ bot = Bot(
 )
 dp = Dispatcher(storage=MemoryStorage())
 app = FastAPI()
+
+# Хранилище оплаченных файлов
+paid_files = {}
+
+# === Загрузка/сохранение оплаченных файлов ===
+def load_paid_files():
+    global paid_files
+    if os.path.exists(USERS_FILE):
+        try:
+            with open(USERS_FILE, "r") as f:
+                paid_files = json.load(f)
+                # Конвертируем строки обратно в datetime
+                for user_id, files in paid_files.items():
+                    for file_id, expiry_str in files.items():
+                        if expiry_str:  # Если есть срок действия
+                            paid_files[user_id][file_id] = datetime.fromisoformat(expiry_str)
+        except Exception as e:
+            logger.error(f"Ошибка загрузки файлов оплаты: {e}")
+            paid_files = {}
+
+def save_paid_files():
+    try:
+        # Конвертируем datetime в строки для JSON
+        save_data = {}
+        for user_id, files in paid_files.items():
+            save_data[user_id] = {}
+            for file_id, expiry in files.items():
+                save_data[user_id][file_id] = expiry.isoformat() if isinstance(expiry, datetime) else expiry
+        
+        with open(USERS_FILE, "w") as f:
+            json.dump(save_data, f)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения файлов оплаты: {e}")
+
+# === Проверка и удаление просроченных доступов ===
+def check_expired_files():
+    now = datetime.now()
+    expired_entries = []
+    
+    for user_id, files in paid_files.items():
+        for file_id, expiry in files.items():
+            if isinstance(expiry, datetime) and now >= expiry:
+                expired_entries.append((user_id, file_id))
+    
+    for user_id, file_id in expired_entries:
+        try:
+            logger.info(f"Удален доступ пользователя {user_id} к файлу {file_id}")
+            del paid_files[user_id][file_id]
+            # Если у пользователя больше нет файлов, удаляем запись
+            if not paid_files[user_id]:
+                del paid_files[user_id]
+        except Exception as e:
+            logger.error(f"Ошибка при удалении доступа: {e}")
+    
+    if expired_entries:
+        save_paid_files()
+
+# === Фоновая проверка каждую минуту ===
+def file_access_watcher():
+    logger.info("[WATCHER] Запущен мониторинг доступов к файлам")
+    while True:
+        check_expired_files()
+        time.sleep(60)
+
+# === Генерация ссылки на оплату файла ===
+def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name: str):
+    params = {
+        "do": "pay",
+        "products[0][name]": f"Файл: {file_name}",
+        "products[0][price]": price,
+        "products[0][quantity]": 1,
+        "order_id": f"file_{user_id}_{file_id}",
+        "customer_extra": f"Оплата файла от пользователя {user_id}"
+    }
+    query = "&".join([f"{k}={v}" for k, v in params.items()])
+    return f"{PAYFORM_URL}/?{query}"
 
 # Подключение к Google Sheets
 try:
@@ -118,6 +201,18 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                 else:
                     logger.error(f"Invalid URL: {url}")
             
+            # Для файловых кнопок используем формат: file|текст|цена|file_id
+            elif button == "file" and i + 3 < len(buttons):
+                logger.info("Обнаружена файловая кнопка")
+                text = buttons[i + 1]
+                price = buttons[i + 2]
+                file_id = buttons[i + 3]
+                logger.info(f"Текст: {text}, Цена: {price}, File ID: {file_id}")
+                
+                keyboard.append([InlineKeyboardButton(text=f"{text} - {price}₽", callback_data=f"buy_file:{file_id}:{price}")])
+                i += 4  # Пропускаем 4 элемента
+                continue
+            
             # Для остальных кнопок используем старый формат с :
             elif ':' in button:
                 logger.info("Обнаружена кнопка с разделителем :")
@@ -128,8 +223,7 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                     btn_type, text, price, extra = parts[0], parts[1], parts[2], parts[3]
                     
                     if btn_type == "file":
-                        short_id = hash(extra) % 10000
-                        keyboard.append([InlineKeyboardButton(text=text, callback_data=f"file:{price}:{short_id}")])
+                        keyboard.append([InlineKeyboardButton(text=f"{text} - {price}₽", callback_data=f"buy_file:{extra}:{price}")])
                         logger.info(f"Добавлена файловая кнопка: {text}")
                     
                     elif btn_type == "channel":
@@ -235,6 +329,50 @@ async def cmd_admin(message: Message):
     await message.answer("👨‍💻 Админ-панель:", reply_markup=admin_kb())
 
 # Обработчики кнопок
+@dp.callback_query(F.data.startswith("buy_file:"))
+async def buy_file_callback(callback: types.CallbackQuery):
+    try:
+        # Разбираем данные кнопки: buy_file:file_id:price
+        parts = callback.data.split(':')
+        if len(parts) < 3:
+            await callback.answer("❌ Ошибка формата кнопки")
+            return
+            
+        file_id = parts[1]
+        price = parts[2]
+        user_id = str(callback.from_user.id)
+        
+        # Проверяем, есть ли уже доступ к файлу
+        if user_id in paid_files and file_id in paid_files[user_id]:
+            expiry = paid_files[user_id][file_id]
+            if isinstance(expiry, datetime) and datetime.now() < expiry:
+                # Отправляем файл
+                await callback.message.answer_document(file_id, caption="✅ Вот ваш файл!")
+                await callback.answer()
+                return
+            elif expiry == "forever":
+                # Бессрочный доступ
+                await callback.message.answer_document(file_id, caption="✅ Вот ваш файл!")
+                await callback.answer()
+                return
+        
+        # Предлагаем оплатить
+        payment_url = generate_file_payment_link(callback.from_user.id, file_id, price, "Файл")
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"💳 Оплатить {price}₽", url=payment_url)]
+        ])
+        
+        await callback.message.answer(
+            f"📦 Для получения файла необходимо оплатить {price}₽\n"
+            f"После оплаты файл будет доступен для скачивания",
+            reply_markup=keyboard
+        )
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки покупки файла: {e}")
+        await callback.answer("❌ Ошибка при обработке запроса")
+
 @dp.callback_query(F.data == "add_post")
 async def add_post_callback(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != ADMIN_ID:
@@ -436,7 +574,8 @@ async def process_button_file(message: Message, state: FSMContext):
         price = data.get("current_button_price")
         file_id = data.get("current_button_file")
         
-        buttons_data.append(f"{btn_type}:{text}:{price}:{file_id}")
+        # Используем новый формат: file|текст|цена|file_id
+        buttons_data.append(f"file|{text}|{price}|{file_id}")
         await state.update_data(buttons_data=buttons_data)
         
         # Возвращаемся к выбору типа
@@ -577,6 +716,58 @@ async def process_final_post(message: Message, state: FSMContext):
     finally:
         await state.clear()
 
+# === Prodamus webhook для файлов ===
+@app.post("/webhook/prodamus/files")
+async def prodamus_files_webhook(request: Request):
+    check_expired_files()  # проверка на каждом апдейте
+    try:
+        # Читаем JSON или form-data
+        try:
+            data = await request.json()
+        except:
+            form = await request.form()
+            data = dict(form)
+
+        # Декодируем customer_extra
+        raw_order = str(data.get("order_id", ""))
+        customer_extra = unquote(str(data.get("customer_extra", "")))
+
+        # Определяем user_id и file_id из order_id
+        if raw_order.startswith("file_") and len(raw_order.split("_")) >= 3:
+            parts = raw_order.split("_")
+            user_id = parts[1]
+            file_id = "_".join(parts[2:])  # На случай если file_id содержит _
+        elif "пользователя" in customer_extra:
+            user_id = customer_extra.split()[-1]
+            # Для этого случая нужен дополнительный способ определить file_id
+            # Можно добавить file_id в customer_extra или использовать другой подход
+            file_id = "unknown"  # Заглушка
+        else:
+            await bot.send_message(ADMIN_ID, f"[ALERT] Не удалось определить user_id/file_id: {data}")
+            return {"status": "error", "message": "Не удалось определить user_id/file_id"}
+
+        # Сохраняем доступ к файлу (бессрочный)
+        if user_id not in paid_files:
+            paid_files[user_id] = {}
+        paid_files[user_id][file_id] = "forever"  # Бессрочный доступ
+        save_paid_files()
+
+        # Отправляем файл пользователю
+        try:
+            await bot.send_message(user_id, "✅ Оплата прошла успешно! Вот ваш файл:")
+            await bot.send_document(user_id, file_id)
+            await bot.send_message(ADMIN_ID, f"Пользователь {user_id} оплатил файл {file_id}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки файла пользователю {user_id}: {e}")
+            await bot.send_message(ADMIN_ID, f"Ошибка отправки файла пользователю {user_id}: {e}")
+
+        return {"status": "success"}
+
+    except Exception as e:
+        logger.error(f"Ошибка вебхука файлов: {e}")
+        await bot.send_message(ADMIN_ID, f"[ALERT] Ошибка вебхука файлов: {e}")
+        return {"status": "error", "message": str(e)}
+
 # Webhook
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
@@ -586,6 +777,9 @@ async def startup():
     if os.getenv("RENDER"):
         await bot.set_webhook(WEBHOOK_URL)
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+    # Загружаем данные об оплатах и запускаем мониторинг
+    load_paid_files()
+    threading.Thread(target=file_access_watcher, daemon=True).start()
 
 @app.post(WEBHOOK_PATH)
 async def webhook(request: Request):
@@ -596,4 +790,4 @@ async def webhook(request: Request):
 
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "sheets": bool(ws)}
+    return {"status": "ok", "sheets": bool(ws), "paid_files_count": len(paid_files)}
