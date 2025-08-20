@@ -68,39 +68,56 @@ def delete_kb(post_id: int) -> InlineKeyboardMarkup:
 def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]:
     """Создает клавиатуру из данных кнопок"""
     if not buttons_data or buttons_data == "нет":
+        logger.info("Нет данных для создания клавиатуры")
         return None
     
     keyboard = []
     try:
         buttons = buttons_data.split('|')
+        logger.info(f"Разделенные кнопки: {buttons}")
+        
         for button in buttons:
+            logger.info(f"Обрабатываю кнопку: {button}")
+            
             # Для URL кнопок используем формат: url|текст|url_адрес
             if button.startswith('url|'):
+                logger.info("Обнаружена URL кнопка")
                 parts = button.split('|')
+                logger.info(f"Части URL кнопки: {parts}")
+                
                 if len(parts) >= 3:
                     text, url = parts[1], '|'.join(parts[2:])
+                    logger.info(f"Текст: {text}, URL: {url}")
+                    
                     if url.startswith(('http://', 'https://')):
                         keyboard.append([InlineKeyboardButton(text=text, url=url)])
+                        logger.info(f"Добавлена URL кнопка: {text} -> {url}")
                     else:
                         logger.error(f"Invalid URL: {url}")
             
             # Для остальных кнопок используем старый формат с :
             elif ':' in button:
+                logger.info("Обнаружена кнопка с разделителем :")
                 parts = button.split(':')
+                logger.info(f"Части кнопки: {parts}")
+                
                 if len(parts) >= 4:
                     btn_type, text, price, extra = parts[0], parts[1], parts[2], parts[3]
                     
                     if btn_type == "file":
                         short_id = hash(extra) % 10000
                         keyboard.append([InlineKeyboardButton(text=text, callback_data=f"file:{price}:{short_id}")])
+                        logger.info(f"Добавлена файловая кнопка: {text}")
                     
                     elif btn_type == "channel":
                         keyboard.append([InlineKeyboardButton(text=text, callback_data=f"chan:{price}:{extra}")])
+                        logger.info(f"Добавлена канальная кнопка: {text}")
                         
     except Exception as e:
-        logger.error(f"Ошибка создания клавиатуры: {e}")
+        logger.error(f"Ошибка создания клавиатуры: {e}", exc_info=True)
         return None
     
+    logger.info(f"Итоговая клавиатура: {keyboard}")
     return InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
 
 # Состояния FSM
@@ -161,7 +178,9 @@ async def cmd_start(message: Message):
             photo_id = post.get("post_photo", "").strip()
             buttons_data = post.get("post_buttons", "").strip()
             
+            logger.info(f"Данные кнопок из таблицы: '{buttons_data}'")
             keyboard = create_buttons_keyboard(buttons_data)
+            logger.info(f"Созданная клавиатура: {keyboard}")
             
             try:
                 if photo_id:
