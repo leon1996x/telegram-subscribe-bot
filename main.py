@@ -60,7 +60,7 @@ def load_paid_files():
                 # Конвертируем строки обратно в datetime
                 for user_id, files in paid_files.items():
                     for file_id, expiry_str in files.items():
-                        if expiry_str:  # Если есть срок действия
+                        if expiry_str and expiry_str != "forever":  # Если есть срок действия и не бессрочный
                             paid_files[user_id][file_id] = datetime.fromisoformat(expiry_str)
         except Exception as e:
             logger.error(f"Ошибка загрузки файлов оплаты: {e}")
@@ -112,16 +112,54 @@ def file_access_watcher():
 
 # === Генерация ссылки на оплату файла ===
 def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name: str):
+    # Получаем базовый URL для вебхука
+    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/prodamus/files"
+    
     params = {
         "do": "pay",
         "products[0][name]": f"Файл: {file_name}",
         "products[0][price]": price,
         "products[0][quantity]": 1,
         "order_id": f"file_{user_id}_{file_id}",
-        "customer_extra": f"Оплата файла от пользователя {user_id}"
+        "customer_extra": f"Оплата файла {file_id} от пользователя {user_id}",
+        "callback_url": webhook_url  # Добавляем URL для callback
     }
     query = "&".join([f"{k}={v}" for k, v in params.items()])
     return f"{PAYFORM_URL}/?{query}"
+
+def extract_payment_info(data: dict) -> tuple:
+    """Извлекает user_id и file_id из данных платежа"""
+    order_id = data.get('order_id', '')
+    customer_extra = unquote(data.get('customer_extra', ''))
+    
+    # Пробуем разные форматы
+    if order_id.startswith('file_'):
+        parts = order_id.split('_')
+        if len(parts) >= 3:
+            return parts[1], '_'.join(parts[2:])
+    
+    # Пытаемся извлечь из customer_extra
+    patterns = [
+        r'файла (.+?) от пользователя (\d+)',
+        r'file_(.+?)_(\d+)',
+        r'user[:_](\d+).*file[:_](.+)'
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, customer_extra, re.IGNORECASE)
+        if match:
+            return match.group(2), match.group(1)
+    
+    # Последняя попытка - ищем числа как user_id
+    user_id_match = re.search(r'(\d{5,})', customer_extra)
+    if user_id_match:
+        user_id = user_id_match.group(1)
+        # Пытаемся найти file_id (обычно начинается с BQACAgI)
+        file_id_match = re.search(r'(BQACAgI[A-Za-z0-9_-]+)', customer_extra)
+        if file_id_match:
+            return user_id, file_id_match.group(1)
+    
+    raise ValueError(f"Не могу извлечь user_id/file_id из: {order_id}, {customer_extra}")
 
 # Подключение к Google Sheets
 try:
@@ -172,7 +210,7 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                     buttons_data = f"url|{text}|{url}"
                     logger.info(f"Исправленный формат: {buttons_data}")
                 else:
-                    # Ищем URL в оставшихся частях
+                    # Ищем URL в оставшихся частей
                     for url_part in url_parts:
                         if url_part.startswith(('http://', 'https://')):
                             buttons_data = f"url|{text}|{url_part}"
@@ -337,6 +375,26 @@ async def cmd_admin(message: Message):
         await message.answer("🚫 Доступ запрещен")
         return
     await message.answer("👨‍💻 Админ-панель:", reply_markup=admin_kb())
+
+@dp.message(Command("myfiles"))
+async def cmd_myfiles(message: Message):
+    """Показать оплаченные файлы пользователя"""
+    user_id = str(message.from_user.id)
+    
+    if user_id in paid_files and paid_files[user_id]:
+        files_list = []
+        for file_id, expiry in paid_files[user_id].items():
+            status = "✅ Бессрочный" if expiry == "forever" else f"⏰ До {expiry}"
+            # Берем только первые 20 символов file_id для читаемости
+            short_file_id = file_id[:20] + "..." if len(file_id) > 20 else file_id
+            files_list.append(f"📁 {short_file_id} - {status}")
+        
+        await message.answer(
+            "📦 Ваши оплаченные файлы:\n\n" + "\n".join(files_list) +
+            "\n\nНажмите на кнопку файла в посте для скачивания"
+        )
+    else:
+        await message.answer("📭 У вас нет оплаченных файлов")
 
 # Обработчики кнопок
 @dp.callback_query(F.data.startswith("buy_file:"))
@@ -739,53 +797,57 @@ async def process_final_post(message: Message, state: FSMContext):
 # === Prodamus webhook для файлов ===
 @app.post("/webhook/prodamus/files")
 async def prodamus_files_webhook(request: Request):
-    check_expired_files()  # проверка на каждом апдейте
     try:
-        # Читаем JSON или form-data
-        try:
-            data = await request.json()
-        except:
-            form = await request.form()
-            data = dict(form)
-
-        # Декодируем customer_extra
-        raw_order = str(data.get("order_id", ""))
-        customer_extra = unquote(str(data.get("customer_extra", "")))
-
-        # Определяем user_id и file_id из order_id
-        if raw_order.startswith("file_") and len(raw_order.split("_")) >= 3:
-            parts = raw_order.split("_")
-            user_id = parts[1]
-            file_id = "_".join(parts[2:])  # На случай если file_id содержит _
-        elif "пользователя" in customer_extra:
-            user_id = customer_extra.split()[-1]
-            # Для этого случая нужен дополнительный способ определить file_id
-            # Можно добавить file_id в customer_extra или использовать другой подход
-            file_id = "unknown"  # Заглушка
-        else:
-            await bot.send_message(ADMIN_ID, f"[ALERT] Не удалось определить user_id/file_id: {data}")
-            return {"status": "error", "message": "Не удалось определить user_id/file_id"}
-
-        # Сохраняем доступ к файлу (бессрочный)
+        # Получаем данные из формы
+        form_data = await request.form()
+        data = dict(form_data)
+        
+        logger.info(f"Получен вебхук от Prodamus: {dict(data)}")
+        
+        # Проверяем статус оплаты
+        if data.get('payment_status') != 'success':
+            logger.warning(f"Платеж не успешен: {data.get('payment_status')}")
+            return {"status": "error", "message": "Payment not successful"}
+        
+        # Извлекаем информацию о платеже
+        user_id, file_id = extract_payment_info(data)
+        
+        logger.info(f"Извлечено: user_id={user_id}, file_id={file_id}")
+        
+        # Сохраняем доступ к файлу
         if user_id not in paid_files:
             paid_files[user_id] = {}
-        paid_files[user_id][file_id] = "forever"  # Бессрочный доступ
+        paid_files[user_id][file_id] = "forever"
         save_paid_files()
-
-        # Отправляем файл пользователю
+        
+        # Отправляем файл
         try:
             await bot.send_message(user_id, "✅ Оплата прошла успешно! Вот ваш файл:")
             await bot.send_document(user_id, file_id)
-            await bot.send_message(ADMIN_ID, f"Пользователь {user_id} оплатил файл {file_id}")
+            
+            # Уведомляем админа
+            await bot.send_message(
+                ADMIN_ID,
+                f"💰 Пользователь {user_id} оплатил файл\n"
+                f"📁 File ID: {file_id}\n"
+                f"💳 Сумма: {data.get('amount', 'N/A')}₽"
+            )
+            
+            logger.info(f"Файл отправлен пользователю {user_id}")
+            
         except Exception as e:
             logger.error(f"Ошибка отправки файла пользователю {user_id}: {e}")
-            await bot.send_message(ADMIN_ID, f"Ошибка отправки файла пользователю {user_id}: {e}")
-
+            await bot.send_message(
+                ADMIN_ID,
+                f"❌ Не удалось отправить файл пользователю {user_id}: {e}\n"
+                f"Файл: {file_id}"
+            )
+        
         return {"status": "success"}
-
+        
     except Exception as e:
-        logger.error(f"Ошибка вебхука файлов: {e}")
-        await bot.send_message(ADMIN_ID, f"[ALERT] Ошибка вебхука файлов: {e}")
+        logger.error(f"Ошибка вебхука: {e}", exc_info=True)
+        await bot.send_message(ADMIN_ID, f"🚨 Ошибка вебхука файлов: {e}")
         return {"status": "error", "message": str(e)}
 
 # Webhook
