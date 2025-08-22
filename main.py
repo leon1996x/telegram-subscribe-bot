@@ -50,6 +50,28 @@ app = FastAPI()
 paid_files = {}
 file_id_mapping = {}  # Маппинг short_id -> file_id
 
+# === Универсальная функция отправки файла ===
+async def send_file_to_user(user_id: int, file_id: str, caption: str = "Ваш файл"):
+    """Универсальная функция отправки файла любого типа"""
+    try:
+        await bot.send_document(user_id, file_id, caption=caption)
+        logger.info(f"Файл отправлен как документ: {file_id}")
+    except Exception as doc_error:
+        try:
+            await bot.send_photo(user_id, file_id, caption=caption)
+            logger.info(f"Файл отправлен как фото: {file_id}")
+        except Exception as photo_error:
+            try:
+                await bot.send_video(user_id, file_id, caption=caption)
+                logger.info(f"Файл отправлен как видео: {file_id}")
+            except Exception as video_error:
+                try:
+                    await bot.send_audio(user_id, file_id, caption=caption)
+                    logger.info(f"Файл отправлен как аудио: {file_id}")
+                except Exception as audio_error:
+                    logger.error(f"Не удалось отправить файл {file_id}: {doc_error}, {photo_error}, {video_error}, {audio_error}")
+                    await bot.send_message(user_id, "❌ Не удалось отправить файл. Свяжитесь с администратором.")
+
 # === Загрузка/сохранение оплаченных файлов ===
 def load_paid_files():
     global paid_files
@@ -112,7 +134,6 @@ def file_access_watcher():
 
 # === Генерация ссылки на оплату файла ===
 def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name: str):
-    # ЗАМЕНИТЕ ЦЕЛИКОМ ЭТУ СТРОКУ:
     webhook_url = "https://telegram-subscribe-bot-5oh7.onrender.com/webhook"
     
     params = {
@@ -419,7 +440,7 @@ async def test_payment(message: Message):
     try:
         await message.answer("✅ Тестовый доступ сохранен!")
         await message.answer("Пытаюсь отправить файл...")
-        await message.answer_document(test_file_id, caption="✅ Тестовый файл!")
+        await send_file_to_user(message.from_user.id, test_file_id, "✅ Тестовый файл!")
     except Exception as e:
         await message.answer(f"❌ Ошибка отправки файла: {e}")
     
@@ -450,12 +471,12 @@ async def buy_file_callback(callback: types.CallbackQuery):
             expiry = paid_files[user_id][file_id]
             if isinstance(expiry, datetime) and datetime.now() < expiry:
                 # Отправляем файл
-                await callback.message.answer_document(file_id, caption="✅ Вот ваш файл!")
+                await send_file_to_user(callback.from_user.id, file_id, "✅ Вот ваш файл!")
                 await callback.answer()
                 return
             elif expiry == "forever":
                 # Бессрочный доступ
-                await callback.message.answer_document(file_id, caption="✅ Вот ваш файл!")
+                await send_file_to_user(callback.from_user.id, file_id, "✅ Вот ваш файл!")
                 await callback.answer()
                 return
         
@@ -581,7 +602,7 @@ async def process_post_photo(message: Message, state: FSMContext):
 async def process_buttons_choice(callback: types.CallbackQuery, state: FSMContext):
     try:
         if callback.data == "add_buttons_no":
-            # Сохраняем пост без кнопок
+            # Сохраняем пост без кнопки
             await state.update_data(buttons="нет")
             await process_final_post(callback.message, state)
         else:
@@ -784,7 +805,6 @@ async def process_final_post(message: Message, state: FSMContext):
             # Сохраняем в таблицу (объединяем через |)
             buttons_str = "|".join(buttons_data) if buttons_data else "нет"
             ws.append_row(["", "", "", "", "", post_id, text, photo_id, buttons_str])
-            
             # Создаем клавиатуру для рассылки
             keyboard = create_buttons_keyboard(buttons_str)
             
@@ -854,7 +874,7 @@ async def prodamus_files_webhook(request: Request):
         # Отправляем файл
         try:
             await bot.send_message(user_id, "✅ Оплата прошла успешно! Вот ваш файл:")
-            await bot.send_document(user_id, file_id)
+            await send_file_to_user(user_id, file_id, "✅ Ваш файл")
             
             # Уведомляем админа
             await bot.send_message(
