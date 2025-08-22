@@ -112,8 +112,8 @@ def file_access_watcher():
 
 # === Генерация ссылки на оплату файла ===
 def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name: str):
-    # Получаем базовый URL для вебхука
-    webhook_url = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}/webhook/prodamus/files"
+    # ЗАМЕНИТЕ ЦЕЛИКОМ ЭТУ СТРОКУ:
+    webhook_url = "https://telegram-subscribe-bot-5oh7.onrender.com/webhook"
     
     params = {
         "do": "pay",
@@ -122,7 +122,7 @@ def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name
         "products[0][quantity]": 1,
         "order_id": f"file_{user_id}_{file_id}",
         "customer_extra": f"Оплата файла {file_id} от пользователя {user_id}",
-        "callback_url": webhook_url  # Добавляем URL для callback
+        "callback_url": webhook_url
     }
     query = "&".join([f"{k}={v}" for k, v in params.items()])
     return f"{PAYFORM_URL}/?{query}"
@@ -396,6 +396,35 @@ async def cmd_myfiles(message: Message):
     else:
         await message.answer("📭 У вас нет оплаченных файлов")
 
+@dp.message(Command("test_payment"))
+async def test_payment(message: Message):
+    """Тестовая команда для проверки вебхука - ТОЛЬКО ДЛЯ АДМИНА!"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 Только для админа!")
+        return
+        
+    # Создаем тестовый файл для проверки
+    test_file_id = "test_file_id_12345"
+    short_id = hash(test_file_id) % 10000
+    file_id_mapping[str(short_id)] = test_file_id
+    
+    # Сохраняем тестовый доступ
+    user_id = str(message.from_user.id)
+    if user_id not in paid_files:
+        paid_files[user_id] = {}
+    paid_files[user_id][test_file_id] = "forever"
+    save_paid_files()
+    
+    # Пытаемся отправить файл
+    try:
+        await message.answer("✅ Тестовый доступ сохранен!")
+        await message.answer("Пытаюсь отправить файл...")
+        await message.answer_document(test_file_id, caption="✅ Тестовый файл!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка отправки файла: {e}")
+    
+    await message.answer(f"📊 Статус: user_id={user_id}, file_id={test_file_id}")
+
 # Обработчики кнопок
 @dp.callback_query(F.data.startswith("buy_file:"))
 async def buy_file_callback(callback: types.CallbackQuery):
@@ -552,7 +581,7 @@ async def process_post_photo(message: Message, state: FSMContext):
 async def process_buttons_choice(callback: types.CallbackQuery, state: FSMContext):
     try:
         if callback.data == "add_buttons_no":
-            # Сохраняем пост без кнопки
+            # Сохраняем пост без кнопок
             await state.update_data(buttons="нет")
             await process_final_post(callback.message, state)
         else:
@@ -798,6 +827,8 @@ async def process_final_post(message: Message, state: FSMContext):
 @app.post("/webhook/prodamus/files")
 async def prodamus_files_webhook(request: Request):
     try:
+        logger.info("=== ПОЛУЧЕН ВЕБХУК ОТ PRODAMUS ===")
+        
         # Получаем данные из формы
         form_data = await request.form()
         data = dict(form_data)
@@ -848,6 +879,17 @@ async def prodamus_files_webhook(request: Request):
     except Exception as e:
         logger.error(f"Ошибка вебхука: {e}", exc_info=True)
         await bot.send_message(ADMIN_ID, f"🚨 Ошибка вебхука файлов: {e}")
+        return {"status": "error", "message": str(e)}
+
+# Обработчик для старого формата вебхука
+@app.post("/webhook")
+async def legacy_prodamus_webhook(request: Request):
+    """Обработчик для старого формата вебхука"""
+    try:
+        logger.info("Получен вебхук на /webhook (старый формат)")
+        return await prodamus_files_webhook(request)
+    except Exception as e:
+        logger.error(f"Ошибка в legacy вебхуке: {e}")
         return {"status": "error", "message": str(e)}
 
 # Webhook
