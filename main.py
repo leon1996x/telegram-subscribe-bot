@@ -207,7 +207,7 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
             if len(url_parts) >= 2:
                 text, url = url_parts[0], url_parts[1]
                 if url.startswith(('http://', 'https://')):
-                    buttons_data = f"url|{text}|{url}
+                    buttons_data = f"url|{text}|{url}"
                     logger.info(f"Исправленный формат: {buttons_data}")
                 else:
                     # Ищем URL в оставшихся частей
