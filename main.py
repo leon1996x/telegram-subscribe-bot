@@ -27,8 +27,10 @@ PAYFORM_URL = "https://menyayrealnost.payform.ru"
 USERS_FILE = "paid_users.json"
 CHANNEL_ACCESS_FILE = "channel_access.json"
 
-# ID вашего канала (замените на реальный)
-CHANNEL_ID = -1002681575953
+# Основные каналы
+CHANNELS = {
+    "main": "-1002681575953",  # Основной канал "Меняя реальность"
+}
 
 # Проверка переменных
 if not all([BOT_TOKEN, GSHEET_ID]):
@@ -52,8 +54,8 @@ app = FastAPI()
 
 # Хранилища
 paid_files = {}
-file_id_mapping = {}  # Маппинг short_id -> file_id
-channel_access = {}   # Доступы к каналу: {user_id: expiry_date}
+file_id_mapping = {}
+channel_access = {}  # {user_id: {channel_id: expiry_date}}
 
 # === Загрузка/сохранение данных ===
 def load_data():
@@ -71,45 +73,70 @@ def load_data():
             logger.error(f"Ошибка загрузки файлов оплаты: {e}")
             paid_files = {}
     
-    # Загрузка доступов к каналу
+    # Загрузка доступа к каналам
     if os.path.exists(CHANNEL_ACCESS_FILE):
         try:
             with open(CHANNEL_ACCESS_FILE, "r") as f:
-                channel_access_data = json.load(f)
-                for user_id, expiry_str in channel_access_data.items():
-                    if expiry_str == "forever":
-                        channel_access[int(user_id)] = "forever"
-                    else:
-                        channel_access[int(user_id)] = datetime.fromisoformat(expiry_str)
+                channel_access = json.load(f)
+                for user_id, channels in channel_access.items():
+                    for channel_id, expiry_str in channels.items():
+                        if expiry_str != "forever":
+                            channel_access[user_id][channel_id] = datetime.fromisoformat(expiry_str)
         except Exception as e:
-            logger.error(f"Ошибка загрузки доступов к каналу: {e}")
+            logger.error(f"Ошибка загрузки доступа к каналам: {e}")
             channel_access = {}
 
 def save_data():
+    # Сохранение оплаченных файлов
     try:
-        # Сохранение оплаченных файлов
-        save_files_data = {}
+        save_files = {}
         for user_id, files in paid_files.items():
-            save_files_data[user_id] = {}
+            save_files[user_id] = {}
             for file_id, expiry in files.items():
-                save_files_data[user_id][file_id] = expiry.isoformat() if isinstance(expiry, datetime) else expiry
+                save_files[user_id][file_id] = expiry.isoformat() if isinstance(expiry, datetime) else expiry
         
         with open(USERS_FILE, "w") as f:
-            json.dump(save_files_data, f)
-        
-        # Сохранение доступов к каналу
-        save_channel_data = {}
-        for user_id, expiry in channel_access.items():
-            save_channel_data[str(user_id)] = expiry.isoformat() if isinstance(expiry, datetime) else expiry
+            json.dump(save_files, f)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения файлов оплаты: {e}")
+    
+    # Сохранение доступа к каналам
+    try:
+        save_access = {}
+        for user_id, channels in channel_access.items():
+            save_access[user_id] = {}
+            for channel_id, expiry in channels.items():
+                save_access[user_id][channel_id] = expiry.isoformat() if isinstance(expiry, datetime) else expiry
         
         with open(CHANNEL_ACCESS_FILE, "w") as f:
-            json.dump(save_channel_data, f)
-            
+            json.dump(save_access, f)
     except Exception as e:
-        logger.error(f"Ошибка сохранения данных: {e}")
+        logger.error(f"Ошибка сохранения доступа к каналам: {e}")
+
+# === Универсальная функция отправки файла ===
+async def send_file_to_user(user_id: int, file_id: str, caption: str = "Ваш файл"):
+    """Универсальная функция отправки файла любого типа"""
+    try:
+        await bot.send_document(user_id, file_id, caption=caption)
+        logger.info(f"Файл отправлен как документ: {file_id}")
+    except Exception as doc_error:
+        try:
+            await bot.send_photo(user_id, file_id, caption=caption)
+            logger.info(f"Файл отправлен как фото: {file_id}")
+        except Exception as photo_error:
+            try:
+                await bot.send_video(user_id, file_id, caption=caption)
+                logger.info(f"Файл отправлен как видео: {file_id}")
+            except Exception as video_error:
+                try:
+                    await bot.send_audio(user_id, file_id, caption=caption)
+                    logger.info(f"Файл отправлен как аудио: {file_id}")
+                except Exception as audio_error:
+                    logger.error(f"Не удалось отправить файл {file_id}: {doc_error}, {photo_error}, {video_error}, {audio_error}")
+                    await bot.send_message(user_id, "❌ Не удалось отправить файл. Свяжитесь с администратором.")
 
 # === Проверка и удаление просроченных доступов ===
-def check_expired_access():
+async def check_expired_access():
     now = datetime.now()
     
     # Проверка файлов
@@ -121,140 +148,146 @@ def check_expired_access():
     
     for user_id, file_id in expired_files:
         try:
-            logger.info(f"Удален доступ пользователя {user_id} к файлу {file_id}")
             del paid_files[user_id][file_id]
             if not paid_files[user_id]:
                 del paid_files[user_id]
         except Exception as e:
             logger.error(f"Ошибка при удалении доступа к файлу: {e}")
     
-    # Проверка доступа к каналу
-    expired_channel = []
-    for user_id, expiry in channel_access.items():
-        if isinstance(expiry, datetime) and now >= expiry:
-            expired_channel.append(user_id)
+    # Проверка доступа к каналам
+    expired_channels = []
+    for user_id, channels in channel_access.items():
+        for channel_id, expiry in channels.items():
+            if isinstance(expiry, datetime) and now >= expiry:
+                expired_channels.append((user_id, channel_id))
     
-    for user_id in expired_channel:
+    for user_id, channel_id in expired_channels:
         try:
-            logger.info(f"Удаляем доступ пользователя {user_id} к каналу")
             # Кикаем пользователя из канала
-            await bot.ban_chat_member(CHANNEL_ID, user_id)
-            await bot.unban_chat_member(CHANNEL_ID, user_id)
-            await bot.send_message(user_id, "⏰ Срок вашей подписки истёк. Для продления оплатите снова.")
-            del channel_access[user_id]
+            await bot.ban_chat_member(channel_id, int(user_id))
+            await bot.unban_chat_member(channel_id, int(user_id))
+            
+            # Уведомляем пользователя
+            await bot.send_message(int(user_id), f"⏰ Срок вашего доступа к каналу истёк. Для продления оплатите подписку снова.")
+            
+            # Удаляем из хранилища
+            del channel_access[user_id][channel_id]
+            if not channel_access[user_id]:
+                del channel_access[user_id]
+                
+            logger.info(f"Пользователь {user_id} удалён из канала {channel_id}")
         except Exception as e:
             logger.error(f"Ошибка при удалении доступа к каналу: {e}")
     
-    if expired_files or expired_channel:
+    if expired_files or expired_channels:
         save_data()
 
-# === Фоновая проверка каждую минуту ===
+# === Фоновая проверка ===
 def access_watcher():
     logger.info("[WATCHER] Запущен мониторинг доступов")
     while True:
-        check_expired_access()
+        import asyncio
+        asyncio.run(check_expired_access())
         time.sleep(60)
 
-# === Генерация ссылки на оплату ===
-def generate_payment_link(user_id: int, item_id: str, price: int, item_name: str, item_type: str):
-    webhook_url = "https://telegram-subscribe-bot-5oh7.onrender.com/webhook"
-    
+# === Генерация ссылок на оплату ===
+def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name: str):
     params = {
         "do": "pay",
-        "products[0][name]": f"{item_type}: {item_name}",
+        "products[0][name]": f"Файл: {file_name}",
         "products[0][price]": price,
         "products[0][quantity]": 1,
-        "order_id": f"{item_type}_{user_id}_{item_id}",
-        "customer_extra": f"Оплата {item_type} {item_id} от пользователя {user_id}",
-        "callback_url": webhook_url
+        "order_id": f"file_{user_id}_{file_id}",
+        "customer_extra": f"Оплата файла {file_id} от пользователя {user_id}",
+        "callback_url": "https://telegram-subscribe-bot-5oh7.onrender.com/webhook"
     }
     query = "&".join([f"{k}={v}" for k, v in params.items()])
     return f"{PAYFORM_URL}/?{query}"
 
+def generate_channel_payment_link(user_id: int, channel_id: str, price: int, days: int):
+    period = f"{days} дней" if days != 0 else "навсегда"
+    params = {
+        "do": "pay",
+        "products[0][name]": f"Доступ к каналу ({period})",
+        "products[0][price]": price,
+        "products[0][quantity]": 1,
+        "order_id": f"channel_{user_id}_{channel_id}_{days}",
+        "customer_extra": f"Оплата доступа к каналу {channel_id} на {period} от пользователя {user_id}",
+        "callback_url": "https://telegram-subscribe-bot-5oh7.onrender.com/webhook"
+    }
+    query = "&".join([f"{k}={v}" for k, v in params.items()])
+    return f"{PAYFORM_URL}/?{query}"
+
+# === Извлечение информации о платеже ===
 def extract_payment_info(data: dict) -> tuple:
-    """Извлекает user_id и item_id из данных платежа"""
     order_id = data.get('order_id', '')
     customer_extra = unquote(data.get('customer_extra', ''))
     
-    # Определяем тип оплаты (file или channel)
+    # Для файлов
     if order_id.startswith('file_'):
         parts = order_id.split('_')
         if len(parts) >= 3:
-            return parts[1], '_'.join(parts[2:]), 'file'
+            return "file", parts[1], '_'.join(parts[2:]), None
+    
+    # Для каналов
     elif order_id.startswith('channel_'):
         parts = order_id.split('_')
-        if len(parts) >= 3:
-            return parts[1], '_'.join(parts[2:]), 'channel'
+        if len(parts) >= 5:
+            return "channel", parts[1], parts[2], int(parts[3])
     
     # Пытаемся извлечь из customer_extra
     patterns = [
         r'файла (.+?) от пользователя (\d+)',
-        r'канала (.+?) от пользователя (\d+)',
+        r'канала (.+?) на (.+?) от пользователя (\d+)',
         r'file_(.+?)_(\d+)',
-        r'channel_(.+?)_(\d+)',
-        r'user[:_](\d+).*(file|channel)[:_](.+)'
+        r'channel_(.+?)_(\d+)_(\d+)'
     ]
     
     for pattern in patterns:
         match = re.search(pattern, customer_extra, re.IGNORECASE)
         if match:
-            if len(match.groups()) >= 3:
-                return match.group(2), match.group(1), match.group(3) if 'file' in match.group(3) or 'channel' in match.group(3) else 'file'
-            else:
-                return match.group(2), match.group(1), 'file'
+            if 'файла' in pattern:
+                return "file", match.group(2), match.group(1), None
+            elif 'канала' in pattern:
+                days_str = match.group(2)
+                days = 0 if 'навсегда' in days_str else int(re.search(r'\d+', days_str).group())
+                return "channel", match.group(3), match.group(1), days
     
-    # Последняя попытка
-    user_id_match = re.search(r'(\d{5,})', customer_extra)
-    if user_id_match:
-        user_id = user_id_match.group(1)
-        # Пытаемся определить тип
-        if 'канал' in customer_extra.lower():
-            return user_id, 'channel_access', 'channel'
-        else:
-            return user_id, 'file_access', 'file'
-    
-    raise ValueError(f"Не могу извлечь информацию из: {order_id}, {customer_extra}")
+    raise ValueError(f"Не могу извлечь данные из: {order_id}, {customer_extra}")
 
-# === Функции для работы с каналом ===
-async def grant_channel_access(user_id: int, days: int = None):
+# === Функции для работы с каналами ===
+async def grant_channel_access(user_id: int, channel_id: str, days: int):
     """Предоставляет доступ к каналу"""
     try:
         # Разбаниваем пользователя
-        await bot.unban_chat_member(CHANNEL_ID, user_id)
+        await bot.unban_chat_member(int(channel_id), user_id)
         
         # Создаем одноразовую ссылку
-        invite_link = await bot.create_chat_invite_link(
-            chat_id=CHANNEL_ID,
-            member_limit=1,
-            creates_join_request=False
+        invite = await bot.create_chat_invite_link(
+            chat_id=int(channel_id),
+            expire_date=None,
+            member_limit=1
         )
         
         # Сохраняем доступ
-        if days is None:
-            channel_access[user_id] = "forever"
+        if str(user_id) not in channel_access:
+            channel_access[str(user_id)] = {}
+        
+        if days == 0:  # навсегда
+            channel_access[str(user_id)][channel_id] = "forever"
         else:
-            channel_access[user_id] = datetime.now() + timedelta(days=days)
+            expiry_date = datetime.now() + timedelta(days=days)
+            channel_access[str(user_id)][channel_id] = expiry_date
         
         save_data()
         
-        return invite_link.invite_link
+        return invite.invite_link
         
     except Exception as e:
         logger.error(f"Ошибка предоставления доступа к каналу: {e}")
         raise
 
-async def revoke_channel_access(user_id: int):
-    """Отзывает доступ к каналу"""
-    try:
-        await bot.ban_chat_member(CHANNEL_ID, user_id)
-        await bot.unban_chat_member(CHANNEL_ID, user_id)
-        if user_id in channel_access:
-            del channel_access[user_id]
-        save_data()
-    except Exception as e:
-        logger.error(f"Ошибка отзыва доступа к каналу: {e}")
-
-# Подключение к Google Sheets
+# === Подключение к Google Sheets ===
 try:
     creds_path = '/etc/secrets/GSPREAD_CREDENTIALS.json'
     creds = Credentials.from_service_account_file(creds_path, scopes=[
@@ -268,7 +301,7 @@ except Exception as e:
     logger.error(f"Ошибка Google Sheets: {e}")
     ws = None
 
-# Клавиатуры
+# === Клавиатуры ===
 def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить пост", callback_data="add_post")],
@@ -283,20 +316,17 @@ def delete_kb(post_id: int) -> InlineKeyboardMarkup:
 def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]:
     """Создает клавиатуру из данных кнопок"""
     if not buttons_data or buttons_data == "нет":
-        logger.info("Нет данных для создания клавиатуры")
         return None
     
     keyboard = []
     try:
         buttons = buttons_data.split('|')
-        logger.info(f"Разделенные кнопки: {buttons}")
-        
         i = 0
+        
         while i < len(buttons):
             button = buttons[i]
-            logger.info(f"Обрабатываю кнопку [{i}]: {button}")
             
-            # Для URL кнопок
+            # URL кнопки: url|текст|url_адрес
             if button == "url" and i + 2 < len(buttons):
                 text = buttons[i + 1]
                 url = buttons[i + 2]
@@ -305,7 +335,7 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                     i += 3
                     continue
             
-            # Для файловых кнопок
+            # Файловые кнопки: file|текст|цена|short_id
             elif button == "file" and i + 3 < len(buttons):
                 text = buttons[i + 1]
                 price = buttons[i + 2]
@@ -317,16 +347,17 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                 i += 4
                 continue
             
-            # Для канальных кнопок
+            # Канальные кнопки: channel|текст|цена|channel_id|дни
             elif button == "channel" and i + 4 < len(buttons):
                 text = buttons[i + 1]
                 price = buttons[i + 2]
-                days = buttons[i + 3]
-                channel_id = buttons[i + 4]
-                callback_data = f"buy_channel:{channel_id}:{price}:{days}"
+                channel_id = buttons[i + 3]
+                days = buttons[i + 4]
+                
+                period = "навсегда" if days == "0" else f"{days} дн."
                 keyboard.append([InlineKeyboardButton(
-                    text=f"{text} - {price}₽", 
-                    callback_data=callback_data
+                    text=f"{text} - {price}₽ ({period})", 
+                    callback_data=f"buy_channel:{channel_id}:{price}:{days}"
                 )])
                 i += 5
                 continue
@@ -334,13 +365,12 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
             i += 1
                         
     except Exception as e:
-        logger.error(f"Ошибка создания клавиатуры: {e}", exc_info=True)
+        logger.error(f"Ошибка создания клавиатуры: {e}")
         return None
     
-    logger.info(f"Итоговая клавиатура: {keyboard}")
     return InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
 
-# Состояния FSM
+# === Состояния FSM ===
 class PostStates(StatesGroup):
     waiting_text = State()
     waiting_photo = State()
@@ -349,30 +379,40 @@ class PostStates(StatesGroup):
     waiting_button_text = State()
     waiting_button_price = State()
     waiting_button_file = State()
+    waiting_button_channel = State()
     waiting_button_days = State()
     waiting_button_url = State()
-    waiting_button_channel_days = State()
 
-# Регистрация пользователя
+# === Регистрация пользователя ===
 async def register_user(user: types.User):
     if not ws:
         return
         
     try:
         user_id = str(user.id)
+        if not user_id.isdigit():
+            logger.error(f"Invalid user_id: {user_id}")
+            return
+
         records = ws.get_all_records()
         
         if not any(str(r.get("id", "")).strip() == user_id for r in records):
             ws.append_row([
                 user_id,
                 user.username or "",
-                "", "", "", "", "", "", ""
+                "",  # file_url
+                "",  # subscription_type
+                "",  # subscription_end
+                "",  # post_id
+                "",  # post_text
+                "",  # post_photo
+                ""   # post_buttons
             ])
             logger.info(f"Зарегистрирован новый пользователь: {user_id}")
     except Exception as e:
         logger.error(f"Ошибка регистрации пользователя: {e}")
 
-# Обработчики команд
+# === Обработчики команд ===
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     try:
@@ -420,34 +460,43 @@ async def cmd_admin(message: Message):
 
 @dp.message(Command("myfiles"))
 async def cmd_myfiles(message: Message):
-    """Показать оплаченные файлы и доступы"""
+    """Показать оплаченные файлы пользователя"""
     user_id = str(message.from_user.id)
-    response = []
     
-    # Файлы
     if user_id in paid_files and paid_files[user_id]:
         files_list = []
         for file_id, expiry in paid_files[user_id].items():
-            status = "✅ Бессрочный" if expiry == "forever" else f"⏰ До {expiry.strftime('%d.%m.%Y %H:%M')}"
+            status = "✅ Бессрочный" if expiry == "forever" else f"⏰ До {expiry}"
             short_file_id = file_id[:20] + "..." if len(file_id) > 20 else file_id
             files_list.append(f"📁 {short_file_id} - {status}")
-        response.append("📦 Ваши оплаченные файлы:\n" + "\n".join(files_list))
-    
-    # Доступ к каналу
-    user_id_int = message.from_user.id
-    if user_id_int in channel_access:
-        expiry = channel_access[user_id_int]
-        if expiry == "forever":
-            response.append("🔐 Доступ к каналу: ✅ Бессрочный")
-        else:
-            response.append(f"🔐 Доступ к каналу: ⏰ До {expiry.strftime('%d.%m.%Y %H:%M')}")
-    
-    if response:
-        await message.answer("\n\n".join(response) + "\n\nНажмите на кнопку в посте для использования")
+        
+        await message.answer(
+            "📦 Ваши оплаченные файлы:\n\n" + "\n".join(files_list) +
+            "\n\nНажмите на кнопку файла в посте для скачивания"
+        )
     else:
-        await message.answer("📭 У вас нет оплаченных файлов или доступов")
+        await message.answer("📭 У вас нет оплаченных файлов")
 
-# Обработчики кнопок
+@dp.message(Command("myaccess"))
+async def cmd_myaccess(message: Message):
+    """Показать активные доступы пользователя"""
+    user_id = str(message.from_user.id)
+    
+    if user_id in channel_access and channel_access[user_id]:
+        access_list = []
+        for channel_id, expiry in channel_access[user_id].items():
+            status = "✅ Бессрочный" if expiry == "forever" else f"⏰ До {expiry.strftime('%d.%m.%Y %H:%M')}"
+            channel_name = next((name for name, cid in CHANNELS.items() if cid == channel_id), channel_id)
+            access_list.append(f"📢 {channel_name} - {status}")
+        
+        await message.answer(
+            "🔐 Ваши активные доступы:\n\n" + "\n".join(access_list) +
+            "\n\nНажмите на кнопку канала в посте для получения ссылки"
+        )
+    else:
+        await message.answer("📭 У вас нет активных доступов к каналам")
+
+# === Обработчики кнопок ===
 @dp.callback_query(F.data.startswith("buy_file:"))
 async def buy_file_callback(callback: types.CallbackQuery):
     try:
@@ -460,12 +509,13 @@ async def buy_file_callback(callback: types.CallbackQuery):
         price = parts[2]
         user_id = str(callback.from_user.id)
         
+        # Находим file_id по short_id
         file_id = file_id_mapping.get(short_id)
         if not file_id:
             await callback.answer("❌ Файл не найден")
             return
         
-        # Проверяем доступ
+        # Проверяем, есть ли уже доступ к файлу
         if user_id in paid_files and file_id in paid_files[user_id]:
             expiry = paid_files[user_id][file_id]
             if isinstance(expiry, datetime) and datetime.now() < expiry:
@@ -478,13 +528,14 @@ async def buy_file_callback(callback: types.CallbackQuery):
                 return
         
         # Предлагаем оплатить
-        payment_url = generate_payment_link(callback.from_user.id, file_id, int(price), "Файл", "file")
+        payment_url = generate_file_payment_link(callback.from_user.id, file_id, int(price), "Файл")
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"💳 Оплатить {price}₽", url=payment_url)]
         ])
         
         await callback.message.answer(
-            f"📦 Для получения файла необходимо оплатить {price}₽",
+            f"📦 Для получения файла необходимо оплатить {price}₽\n"
+            f"После оплаты файл будет доступен для скачивания",
             reply_markup=keyboard
         )
         await callback.answer()
@@ -495,6 +546,7 @@ async def buy_file_callback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy_channel:"))
 async def buy_channel_callback(callback: types.CallbackQuery):
+    """Обработчик покупки доступа к каналу"""
     try:
         parts = callback.data.split(':')
         if len(parts) < 4:
@@ -503,103 +555,466 @@ async def buy_channel_callback(callback: types.CallbackQuery):
             
         channel_id = parts[1]
         price = parts[2]
-        days = parts[3]
-        user_id_int = callback.from_user.id
+        days = int(parts[3])
+        user_id = str(callback.from_user.id)
         
-        # Проверяем доступ
-        if user_id_int in channel_access:
-            expiry = channel_access[user_id_int]
+        # Проверяем, есть ли уже доступ
+        if user_id in channel_access and channel_id in channel_access[user_id]:
+            expiry = channel_access[user_id][channel_id]
             if expiry == "forever" or (isinstance(expiry, datetime) and datetime.now() < expiry):
-                try:
-                    invite_link = await grant_channel_access(user_id_int)
-                    await callback.message.answer(
-                        f"✅ У вас уже есть доступ к каналу!\n" 
-                        f"Ссылка для входа: {invite_link}"
-                    )
-                    await callback.answer()
-                    return
-                except Exception as e:
-                    await callback.message.answer("❌ Ошибка доступа к каналу")
-                    await callback.answer()
-                    return
+                # Обновляем ссылку
+                invite_link = await grant_channel_access(callback.from_user.id, channel_id, days)
+                await callback.message.answer(
+                    f"✅ У вас уже есть доступ к каналу!\n"
+                    f"Новая ссылка: {invite_link}"
+                )
+                await callback.answer()
+                return
         
         # Предлагаем оплатить
-        item_name = f"Доступ на {days} дней" if days != "forever" else "Бессрочный доступ"
-        payment_url = generate_payment_link(user_id_int, f"{channel_id}_{days}", int(price), item_name, "channel")
-        
+        payment_url = generate_channel_payment_link(callback.from_user.id, channel_id, int(price), days)
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"💳 Оплатить {price}₽", url=payment_url)]
         ])
         
+        period = "навсегда" if days == 0 else f"{days} дней"
         await callback.message.answer(
             f"🔐 Для доступа к каналу необходимо оплатить {price}₽\n"
-            f"Срок доступа: {item_name}",
+            f"Доступ предоставляется на {period}\n"
+            f"После оплаты вы получите ссылку для входа",
             reply_markup=keyboard
         )
         await callback.answer()
         
     except Exception as e:
-        logger.error(f"Ошибка обработки покупки доступа: {e}")
+        logger.error(f"Ошибка обработки покупки канала: {e}")
         await callback.answer("❌ Ошибка при обработке запроса")
 
-# === Prodamus webhook ===
-@app.post("/webhook/prodamus/files")
-async def prodamus_webhook(request: Request):
+@dp.callback_query(F.data == "add_post")
+async def add_post_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+    
+    await state.set_state(PostStates.waiting_text)
+    await callback.message.answer("📝 Введите текст поста:")
+    await callback.answer()
+
+@dp.callback_query(F.data == "list_posts")
+async def list_posts_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+        
+    posts = ws.get_all_records() if ws else []
+    posts = [p for p in posts if str(p.get("post_id", "")).strip()]
+    
+    if not posts:
+        await callback.message.answer("📭 Нет постов для отображения")
+        return
+        
+    for post in posts:
+        text = post.get("post_text", "Без текста")
+        photo_id = post.get("post_photo", "").strip()
+        post_id = post.get("post_id", "N/A")
+        buttons_data = post.get("post_buttons", "").strip()
+        
+        keyboard = create_buttons_keyboard(buttons_data)
+        
+        try:
+            if photo_id:
+                await callback.message.answer_photo(
+                    photo_id,
+                    caption=f"{text}\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
+                    reply_markup=keyboard if keyboard else delete_kb(post_id))
+            else:
+                await callback.message.answer(
+                    f"{text}\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
+                    reply_markup=keyboard if keyboard else delete_kb(post_id))
+        except Exception as e:
+            logger.error(f"Ошибка отправки поста {post_id}: {e}")
+            await callback.message.answer(
+                f"📄 {text[:300]}...\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
+                reply_markup=delete_kb(post_id))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("delete_"))
+async def delete_post_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+        
+    post_id = callback.data.split("_")[1]
+    try:
+        if ws:
+            records = ws.get_all_values()
+            for idx, row in enumerate(records[1:], start=2):
+                if str(row[5]) == str(post_id):
+                    ws.delete_rows(idx)
+                    await callback.message.delete()
+                    await callback.answer("✅ Пост удален")
+                    return
+        await callback.answer("❌ Пост не найден")
+    except Exception as e:
+        logger.error(f"Ошибка удаления: {e}")
+        await callback.answer("⚠️ Ошибка удаления")
+
+# === Обработчики состояний ===
+@dp.message(PostStates.waiting_text)
+async def process_post_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await state.set_state(PostStates.waiting_photo)
+    await message.answer("📷 Отправьте фото или напишите 'пропустить':")
+
+@dp.message(PostStates.waiting_photo)
+async def process_post_photo(message: Message, state: FSMContext):
+    try:
+        if message.photo:
+            await state.update_data(photo_id=message.photo[-1].file_id)
+        elif message.text and message.text.lower() == "пропустить":
+            await state.update_data(photo_id="")
+        else:
+            await message.answer("❌ Отправьте фото или напишите 'пропустить'")
+            return
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да", callback_data="add_buttons_yes")],
+            [InlineKeyboardButton(text="❌ Нет", callback_data="add_buttons_no")]
+        ])
+        
+        await state.set_state(PostStates.waiting_buttons_choice)
+        await message.answer("📌 Хотите добавить кнопки к посту?", reply_markup=keyboard)
+            
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {e}")
+        await message.answer("❌ Ошибка обработки")
+        await state.clear()
+
+@dp.callback_query(PostStates.waiting_buttons_choice, F.data.in_(["add_buttons_yes", "add_buttons_no"]))
+async def process_buttons_choice(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        if callback.data == "add_buttons_no":
+            await state.update_data(buttons="нет")
+            await process_final_post(callback.message, state)
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
+                [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
+                [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
+                [InlineKeyboardButton(text="✅ Готово", callback_data="button_type_done")]
+            ])
+            await state.set_state(PostStates.waiting_button_type)
+            await state.update_data(buttons_data=[])
+            await callback.message.answer("🎛 Выберите тип кнопки:", reply_markup=keyboard)
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка выбора кнопок: {e}")
+        await callback.message.answer("❌ Ошибка")
+
+@dp.callback_query(PostStates.waiting_button_type, F.data.startswith("button_type_"))
+async def process_button_type(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        btn_type = callback.data.split("_")[2]
+        await state.update_data(current_button_type=btn_type)
+        
+        if btn_type in ["file", "channel", "url"]:
+            await state.set_state(PostStates.waiting_button_text)
+            await callback.message.answer("📝 Введите текст для кнопки:")
+        elif btn_type == "done":
+            await process_final_post(callback.message, state)
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка выбора типа: {e}")
+        await callback.message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_text)
+async def process_button_text(message: Message, state: FSMContext):
+    try:
+        await state.update_data(current_button_text=message.text)
+        data = await state.get_data()
+        btn_type = data.get("current_button_type")
+        
+        if btn_type in ["file", "channel"]:
+            await state.set_state(PostStates.waiting_button_price)
+            await message.answer("💰 Введите цену в рублях:")
+        elif btn_type == "url":
+            await state.set_state(PostStates.waiting_button_url)
+            await message.answer("🔗 Введите URL:")
+            
+    except Exception as e:
+        logger.error(f"Ошибка текста кнопки: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_price)
+async def process_button_price(message: Message, state: FSMContext):
+    try:
+        price = message.text.strip()
+        if not price.isdigit():
+            await message.answer("❌ Введите корректную цену (число):")
+            return
+            
+        await state.update_data(current_button_price=price)
+        data = await state.get_data()
+        btn_type = data.get("current_button_type")
+        
+        if btn_type == "file":
+            await state.set_state(PostStates.waiting_button_file)
+            await message.answer("📎 Отправьте файл для продажи:")
+        elif btn_type == "channel":
+            await state.set_state(PostStates.waiting_button_channel)
+            await message.answer("🔗 Введите ID канала (например: -1002681575953):")
+        elif btn_type == "url":
+            await state.set_state(PostStates.waiting_button_url)
+            await message.answer("🔗 Введите URL:")
+            
+    except Exception as e:
+        logger.error(f"Ошибка цены: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_channel)
+async def process_button_channel(message: Message, state: FSMContext):
+    try:
+        channel_id = message.text.strip()
+        if not (channel_id.startswith('-100') and channel_id[4:].isdigit() and len(channel_id) > 4):
+            await message.answer("❌ Неверный формат ID канала. Должен быть вида: -1001234567890")
+            return
+            
+        await state.update_data(current_button_channel=channel_id)
+        await state.set_state(PostStates.waiting_button_days)
+        await message.answer("📅 Введите количество дней доступа (0 для бессрочного):")
+            
+    except Exception as e:
+        logger.error(f"Ошибка ID канала: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_days)
+async def process_button_days(message: Message, state: FSMContext):
+    try:
+        days_str = message.text.strip()
+        if not days_str.isdigit():
+            await message.answer("❌ Введите число дней (0 для бессрочного):")
+            return
+            
+        days = int(days_str)
+        
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        btn_type = data.get("current_button_type")
+        text = data.get("current_button_text")
+        price = data.get("current_button_price")
+        channel_id = data.get("current_button_channel")
+        
+        # Используем новый формат: channel|текст|цена|channel_id|дни
+        buttons_data.append(f"channel|{text}|{price}|{channel_id}|{days}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка дней: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_file)
+async def process_button_file(message: Message, state: FSMContext):
+    try:
+        if not (message.document or message.photo):
+            await message.answer("❌ Отправьте файл или фото:")
+            return
+            
+        file_id = message.document.file_id if message.document else message.photo[-1].file_id
+        await state.update_data(current_button_file=file_id)
+        
+        # Добавляем кнопку в список
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        btn_type = data.get("current_button_type")
+        text = data.get("current_button_text")
+        price = data.get("current_button_price")
+        file_id = data.get("current_button_file")
+        
+        # Генерируем короткий ID и сохраняем маппинг
+        short_id = hash(file_id) % 10000
+        file_id_mapping[str(short_id)] = file_id
+        
+        # Используем новый формат: file|текст|цена|short_id
+        buttons_data.append(f"file|{text}|{price}|{short_id}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка файла: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_url)
+async def process_button_url(message: Message, state: FSMContext):
+    try:
+        url = message.text.strip()
+        if not (url.startswith('http://') or url.startswith('https://')):
+            await message.answer("❌ URL должен начинаться с http:// или https://")
+            return
+        
+        # Добавляем кнопку в список
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        text = data.get("current_button_text")
+        
+        # Правильный формат: url|текст|url_адрес
+        buttons_data.append(f"url|{text}|{url}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка URL: {e}")
+        await message.answer("❌ Ошибка")
+
+async def offer_more_buttons(message: Message, state: FSMContext):
+    """Предлагает добавить еще кнопки"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
+        [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
+        [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
+        [InlineKeyboardButton(text="✅ Готово", callback_data="button_type_done")]
+    ])
+    await state.set_state(PostStates.waiting_button_type)
+    await message.answer("🎛 Добавить еще кнопку или завершить?", reply_markup=keyboard)
+
+@dp.callback_query(PostStates.waiting_button_type, F.data == "button_type_done")
+async def process_buttons_done(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка завершения добавления кнопок"""
+    await process_final_post(callback.message, state)
+    await callback.answer()
+
+async def process_final_post(message: Message, state: FSMContext):
+    """Финальное сохранение поста"""
+    try:
+        data = await state.get_data()
+        text = data.get("text", "")
+        photo_id = data.get("photo_id", "")
+        buttons_data = data.get("buttons_data", [])
+        
+        if ws:
+            records = ws.get_all_records()
+            
+            post_ids = []
+            for p in records:
+                try:
+                    post_id_str = str(p.get("post_id", "")).strip()
+                    if post_id_str:
+                        post_ids.append(int(post_id_str))
+                except (ValueError, AttributeError):
+                    continue
+            post_id = max(post_ids + [0]) + 1
+            
+            user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).strip()}
+            
+            # Сохраняем в таблицу (объединяем через |)
+            buttons_str = "|".join(buttons_data) if buttons_data else "нет"
+            ws.append_row(["", "", "", "", "", post_id, text, photo_id, buttons_str])
+            # Создаем клавиатуру для рассылки
+            keyboard = create_buttons_keyboard(buttons_str)
+            
+            # Рассылаем пост
+            success = 0
+            for user_id in user_ids:
+                try:
+                    if photo_id:
+                        await bot.send_photo(
+                            user_id, 
+                            photo=photo_id, 
+                            caption=text,
+                            reply_markup=keyboard
+                        )
+                    else:
+                        await bot.send_message(
+                            user_id, 
+                            text=text,
+                            reply_markup=keyboard
+                        )
+                    success += 1
+                except Exception as e:
+                    logger.error(f"Не удалось отправить пост пользователю {user_id}: {e}")
+
+            await message.answer(
+                f"✅ Пост добавлен (ID: {post_id})\n"
+                f"Кнопки: {len(buttons_data)} шт.\n"
+                f"Отправлено: {success}/{len(user_ids)}"
+            )
+        else:
+            await message.answer("⚠️ База данных недоступна")
+            
+    except Exception as e:
+        logger.error(f"Ошибка добавления поста: {e}", exc_info=True)
+        await message.answer("❌ Ошибка при добавлении поста")
+    finally:
+        await state.clear()
+
+# === Универсальный вебхук для всех платежей ===
+@app.post("/webhook")
+async def universal_webhook(request: Request):
+    """Обрабатывает все типы платежей"""
     try:
         logger.info("=== ПОЛУЧЕН ВЕБХУК ОТ PRODAMUS ===")
         
+        # Получаем данные из формы
         form_data = await request.form()
         data = dict(form_data)
         
-        logger.info(f"Получен вебхук: {dict(data)}")
+        logger.info(f"Данные вебхука: {data}")
         
+        # Проверяем статус оплаты
         if data.get('payment_status') != 'success':
             logger.warning(f"Платеж не успешен: {data.get('payment_status')}")
             return {"status": "error", "message": "Payment not successful"}
         
         # Извлекаем информацию о платеже
-        user_id, item_id, item_type = extract_payment_info(data)
-        user_id_int = int(user_id)
+        payment_type, user_id, target_id, days = extract_payment_info(data)
         
-        logger.info(f"Извлечено: user_id={user_id}, item_id={item_id}, type={item_type}")
+        logger.info(f"Извлечено: type={payment_type}, user_id={user_id}, target_id={target_id}, days={days}")
         
-        if item_type == 'file':
-            # Обработка файла
+        if payment_type == "file":
+            # Обработка оплаты файла
             if user_id not in paid_files:
                 paid_files[user_id] = {}
-            paid_files[user_id][item_id] = "forever"
+            paid_files[user_id][target_id] = "forever"
             save_data()
             
-            await bot.send_message(user_id_int, "✅ Оплата прошла успешно! Вот ваш файл:")
-            await send_file_to_user(user_id_int, item_id, "✅ Ваш файл")
+            # Отправляем файл
+            await bot.send_message(user_id, "✅ Оплата файла прошла успешно! Вот ваш файл:")
+            await send_file_to_user(user_id, target_id, "✅ Ваш файл")
             
+            # Уведомляем админа
             await bot.send_message(
                 ADMIN_ID,
                 f"💰 Пользователь {user_id} оплатил файл\n"
-                f"📁 File ID: {item_id}\n"
+                f"📁 File ID: {target_id}\n"
                 f"💳 Сумма: {data.get('amount', 'N/A')}₽"
             )
             
-        elif item_type == 'channel':
-            # Обработка доступа к каналу
-            parts = item_id.split('_')
-            channel_id = parts[0]
-            days_str = parts[1] if len(parts) > 1 else "forever"
+        elif payment_type == "channel":
+            # Обработка оплаты доступа к каналу
+            invite_link = await grant_channel_access(int(user_id), target_id, days)
             
-            days = None if days_str == "forever" else int(days_str)
-            invite_link = await grant_channel_access(user_id_int, days)
-            
+            # Отправляем ссылку
+            period = "навсегда" if days == 0 else f"{days} дней"
             await bot.send_message(
-                user_id_int,
-                f"✅ Оплата прошла успешно!\n"
-                f"Ссылка для входа в канал: {invite_link}\n"
-                f"Срок доступа: {'бессрочно' if days is None else f'{days} дней'}"
+                user_id,
+                f"✅ Оплата доступа к каналу прошла успешно! Доступ предоставлен на {period}.\n"
+                f"Вот ваша ссылка для входа: {invite_link}"
             )
             
+            # Уведомляем админа
             await bot.send_message(
                 ADMIN_ID,
                 f"💰 Пользователь {user_id} оплатил доступ к каналу\n"
-                f"⏰ Срок: {'бессрочно' if days is None else f'{days} дней'}\n"
+                f"📢 Канал: {target_id}\n"
+                f"⏰ Срок: {period}\n"
                 f"💳 Сумма: {data.get('amount', 'N/A')}₽"
             )
         
@@ -610,10 +1025,7 @@ async def prodamus_webhook(request: Request):
         await bot.send_message(ADMIN_ID, f"🚨 Ошибка вебхука: {e}")
         return {"status": "error", "message": str(e)}
 
-# Остальной код остается без изменений...
-# [Здесь должен быть остальной код из вашего файла: состояния FSM, обработчики и т.д.]
-
-# Webhook
+# === Webhook настройки ===
 WEBHOOK_PATH = f"/webhook/{BOT_TOKEN}"
 WEBHOOK_URL = f"https://{os.getenv('RENDER_EXTERNAL_HOSTNAME')}{WEBHOOK_PATH}"
 
@@ -622,12 +1034,14 @@ async def startup():
     if os.getenv("RENDER"):
         await bot.set_webhook(WEBHOOK_URL)
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+    
     # Загружаем данные и запускаем мониторинг
     load_data()
     threading.Thread(target=access_watcher, daemon=True).start()
+    logger.info("Бот запущен!")
 
 @app.post(WEBHOOK_PATH)
-async def webhook(request: Request):
+async def telegram_webhook(request: Request):
     data = await request.json()
     update = types.Update(**data)
     await dp.feed_update(bot, update)
@@ -636,3 +1050,7 @@ async def webhook(request: Request):
 @app.get("/")
 async def health_check():
     return {"status": "ok", "sheets": bool(ws), "paid_files_count": len(paid_files), "channel_access_count": len(channel_access)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
