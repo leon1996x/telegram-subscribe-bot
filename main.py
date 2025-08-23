@@ -164,8 +164,8 @@ async def check_expired_access():
     for user_id, channel_id in expired_channels:
         try:
             # Кикаем пользователя из канала
-            await bot.ban_chat_member(channel_id, int(user_id))
-            await bot.unban_chat_member(channel_id, int(user_id))
+            await bot.ban_chat_member(int(channel_id), int(user_id))
+            await bot.unban_chat_member(int(channel_id), int(user_id))
             
             # Уведомляем пользователя
             await bot.send_message(int(user_id), f"⏰ Срок вашего доступа к каналу истёк. Для продления оплатите подписку снова.")
@@ -198,6 +198,7 @@ def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name
         "products[0][price]": price,
         "products[0][quantity]": 1,
         "order_id": f"file_{user_id}_{file_id}",
+        "order_num": f"file_{user_id}_{file_id}",
         "customer_extra": f"Оплата файла {file_id} от пользователя {user_id}",
         "callback_url": "https://telegram-subscribe-bot-5oh7.onrender.com/webhook"
     }
@@ -212,6 +213,7 @@ def generate_channel_payment_link(user_id: int, channel_id: str, price: int, day
         "products[0][price]": price,
         "products[0][quantity]": 1,
         "order_id": f"channel_{user_id}_{channel_id}_{days}",
+        "order_num": f"channel_{user_id}_{channel_id}_{days}",
         "customer_extra": f"Оплата доступа к каналу {channel_id} на {period} от пользователя {user_id}",
         "callback_url": "https://telegram-subscribe-bot-5oh7.onrender.com/webhook"
     }
@@ -220,40 +222,96 @@ def generate_channel_payment_link(user_id: int, channel_id: str, price: int, day
 
 # === Извлечение информации о платеже ===
 def extract_payment_info(data: dict) -> tuple:
+    """Извлекает user_id и file_id из данных платежа"""
     order_id = data.get('order_id', '')
+    order_num = data.get('order_num', '')
     customer_extra = unquote(data.get('customer_extra', ''))
     
+    logger.info(f"DEBUG: order_id={order_id}, order_num={order_num}, customer_extra={customer_extra}")
+    
+    # Сначала проверяем order_num (там наш формат)
+    if order_num.startswith('channel_'):
+        parts = order_num.split('_')
+        if len(parts) >= 4:
+            return "channel", parts[1], parts[2], int(parts[3])
+    
+    # Затем проверяем order_id (старый формат)
+    elif order_id.startswith('channel_'):
+        parts = order_id.split('_')
+        if len(parts) >= 4:
+            return "channel", parts[1], parts[2], int(parts[3])
+    
     # Для файлов
-    if order_id.startswith('file_'):
+    elif order_num.startswith('file_'):
+        parts = order_num.split('_')
+        if len(parts) >= 3:
+            return "file", parts[1], '_'.join(parts[2:]), None
+    
+    elif order_id.startswith('file_'):
         parts = order_id.split('_')
         if len(parts) >= 3:
             return "file", parts[1], '_'.join(parts[2:]), None
     
-    # Для каналов
-    elif order_id.startswith('channel_'):
-        parts = order_id.split('_')
-        if len(parts) >= 5:
-            return "channel", parts[1], parts[2], int(parts[3])
-    
-    # Пытаемся извлечь из customer_extra
+    # Пытаемся извлечь из customer_extra (резервный вариант)
     patterns = [
-        r'файла (.+?) от пользователя (\d+)',
+        r'канала (.+?) на (\d+) дней от пользователя (\d+)',
+        r'канала (.+?) на (\d+) дн\. от пользователя (\d+)',
         r'канала (.+?) на (.+?) от пользователя (\d+)',
-        r'file_(.+?)_(\d+)',
-        r'channel_(.+?)_(\d+)_(\d+)'
+        r'файла (.+?) от пользователя (\d+)',
+        r'channel_(.+?)_(\d+)_(\d+)',
+        r'file_(.+?)_(\d+)'
     ]
     
     for pattern in patterns:
         match = re.search(pattern, customer_extra, re.IGNORECASE)
         if match:
-            if 'файла' in pattern:
-                return "file", match.group(2), match.group(1), None
-            elif 'канала' in pattern:
-                days_str = match.group(2)
-                days = 0 if 'навсегда' in days_str else int(re.search(r'\d+', days_str).group())
-                return "channel", match.group(3), match.group(1), days
+            logger.info(f"DEBUG: Pattern {pattern} matched: {match.groups()}")
+            
+            if 'канала' in pattern or 'channel' in pattern:
+                if len(match.groups()) >= 3:
+                    channel_id = match.group(1)
+                    days_str = match.group(2)
+                    user_id = match.group(3)
+                    
+                    # Обрабатываем "навсегда"
+                    if 'навсегда' in days_str:
+                        days = 0
+                    else:
+                        # Извлекаем число из строки
+                        days_match = re.search(r'\d+', days_str)
+                        days = int(days_match.group()) if days_match else 1
+                    
+                    return "channel", user_id, channel_id, days
+            
+            elif 'файла' in pattern or 'file' in pattern:
+                if len(match.groups()) >= 2:
+                    return "file", match.group(2), match.group(1), None
     
-    raise ValueError(f"Не могу извлечь данные из: {order_id}, {customer_extra}")
+    # Последняя попытка - ищем числа в customer_extra
+    logger.warning(f"Нестандартный формат данных, пробуем извлечь вручную...")
+    
+    # Ищем user_id (обычно 8-10 цифр)
+    user_id_match = re.search(r'(\d{8,10})', customer_extra)
+    if user_id_match:
+        user_id = user_id_match.group(1)
+        
+        # Пытаемся найти channel_id (начинается с -100)
+        channel_match = re.search(r'(-100\d+)', customer_extra)
+        if channel_match:
+            channel_id = channel_match.group(1)
+            
+            # Ищем количество дней
+            days_match = re.search(r'на (\d+) дней', customer_extra)
+            days = int(days_match.group(1)) if days_match else 1
+            
+            return "channel", user_id, channel_id, days
+        
+        # Пытаемся найти file_id (начинается с BQAC)
+        file_match = re.search(r'(BQACAgI[A-Za-z0-9_-]+)', customer_extra)
+        if file_match:
+            return "file", user_id, file_match.group(1), None
+    
+    raise ValueError(f"Не могу извлечь данные из: order_id={order_id}, order_num={order_num}, customer_extra={customer_extra}")
 
 # === Функции для работы с каналами ===
 async def grant_channel_access(user_id: int, channel_id: str, days: int):
@@ -287,7 +345,7 @@ async def grant_channel_access(user_id: int, channel_id: str, days: int):
         logger.error(f"Ошибка предоставления доступа к каналу: {e}")
         raise
 
-# === Подключение к Google Sheets ===
+# Подключение к Google Sheets
 try:
     creds_path = '/etc/secrets/GSPREAD_CREDENTIALS.json'
     creds = Credentials.from_service_account_file(creds_path, scopes=[
@@ -301,7 +359,7 @@ except Exception as e:
     logger.error(f"Ошибка Google Sheets: {e}")
     ws = None
 
-# === Клавиатуры ===
+# Клавиатуры
 def admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить пост", callback_data="add_post")],
@@ -370,7 +428,7 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
     
     return InlineKeyboardMarkup(inline_keyboard=keyboard) if keyboard else None
 
-# === Состояния FSM ===
+# Состояния FSM
 class PostStates(StatesGroup):
     waiting_text = State()
     waiting_photo = State()
@@ -383,7 +441,7 @@ class PostStates(StatesGroup):
     waiting_button_days = State()
     waiting_button_url = State()
 
-# === Регистрация пользователя ===
+# Регистрация пользователя
 async def register_user(user: types.User):
     if not ws:
         return
@@ -412,7 +470,7 @@ async def register_user(user: types.User):
     except Exception as e:
         logger.error(f"Ошибка регистрации пользователя: {e}")
 
-# === Обработчики команд ===
+# Обработчики команд
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
     try:
@@ -496,7 +554,7 @@ async def cmd_myaccess(message: Message):
     else:
         await message.answer("📭 У вас нет активных доступов к каналам")
 
-# === Обработчики кнопок ===
+# Обработчики кнопок
 @dp.callback_query(F.data.startswith("buy_file:"))
 async def buy_file_callback(callback: types.CallbackQuery):
     try:
@@ -659,7 +717,7 @@ async def delete_post_callback(callback: types.CallbackQuery):
         logger.error(f"Ошибка удаления: {e}")
         await callback.answer("⚠️ Ошибка удаления")
 
-# === Обработчики состояний ===
+# Обработчики состояний
 @dp.message(PostStates.waiting_text)
 async def process_post_text(message: Message, state: FSMContext):
     await state.update_data(text=message.text)
@@ -777,10 +835,10 @@ async def process_button_price(message: Message, state: FSMContext):
 async def process_button_channel(message: Message, state: FSMContext):
     try:
         channel_id = message.text.strip()
-        if not (channel_id.startswith('-100') and channel_id[4:].isdigit() and len(channel_id) > 4):
-            await message.answer("❌ Неверный формат ID канала. Должен быть вида: -1001234567890")
-            return
-            
+        # Простая проверка формата (можно вводить любой ID)
+        if not channel_id.startswith('-100'):
+            await message.answer("⚠️ ID канала обычно начинается с -100...\nНо продолжаем...")
+        
         await state.update_data(current_button_channel=channel_id)
         await state.set_state(PostStates.waiting_button_days)
         await message.answer("📅 Введите количество дней доступа (0 для бессрочного):")
@@ -799,6 +857,7 @@ async def process_button_days(message: Message, state: FSMContext):
             
         days = int(days_str)
         
+        # Добавляем кнопку в список
         data = await state.get_data()
         buttons_data = data.get("buttons_data", [])
         btn_type = data.get("current_button_type")
@@ -1022,7 +1081,7 @@ async def universal_webhook(request: Request):
         
     except Exception as e:
         logger.error(f"Ошибка вебхука: {e}", exc_info=True)
-        await bot.send_message(ADMIN_ID, f"🚨 Ошибка вебхука: {e}")
+        await bot.send_message(ADMIN_ID, f"🚨 Ошибка вебхука: {e}\n\nДанные: {data}")
         return {"status": "error", "message": str(e)}
 
 # === Webhook настройки ===
