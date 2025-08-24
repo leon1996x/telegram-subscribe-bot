@@ -138,6 +138,7 @@ async def send_file_to_user(user_id: int, file_id: str, caption: str = "Ваш �
 # === Проверка и удаление просроченных доступов ===
 async def check_expired_access():
     now = datetime.now()
+    logger.info(f"[WATCHER] Проверка доступов в {now}")
     
     # Проверка файлов
     expired_files = []
@@ -151,6 +152,7 @@ async def check_expired_access():
             del paid_files[user_id][file_id]
             if not paid_files[user_id]:
                 del paid_files[user_id]
+            logger.info(f"Удален доступ к файлу: user {user_id}, file {file_id}")
         except Exception as e:
             logger.error(f"Ошибка при удалении доступа к файлу: {e}")
     
@@ -177,18 +179,36 @@ async def check_expired_access():
                 
             logger.info(f"Пользователь {user_id} удалён из канала {channel_id}")
         except Exception as e:
-            logger.error(f"Ошибка при удалении доступа к каналу: {e}")
+            logger.error(f"Ошибка при удалении доступа к каналу {channel_id}: {e}")
+            # Если не удалось кикнуть, все равно удаляем из хранилища
+            try:
+                del channel_access[user_id][channel_id]
+                if not channel_access[user_id]:
+                    del channel_access[user_id]
+                logger.info(f"Доступ удален из базы (ошибка кика): user {user_id}, channel {channel_id}")
+            except:
+                pass
     
     if expired_files or expired_channels:
         save_data()
+        logger.info(f"Удалено: {len(expired_files)} файлов, {len(expired_channels)} доступов к каналам")
+    else:
+        logger.info("Просроченных доступов не найдено")
 
 # === Фоновая проверка ===
 def access_watcher():
     logger.info("[WATCHER] Запущен мониторинг доступов")
     while True:
-        import asyncio
-        asyncio.run(check_expired_access())
-        time.sleep(60)
+        try:
+            # Создаем новую event loop для асинхронного вызова
+            import asyncio
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(check_expired_access())
+            loop.close()
+        except Exception as e:
+            logger.error(f"Ошибка в мониторинге доступов: {e}")
+        time.sleep(60)  # проверка каждую минуту
 
 # === Генерация ссылок на оплату ===
 def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name: str):
@@ -317,8 +337,21 @@ def extract_payment_info(data: dict) -> tuple:
 async def grant_channel_access(user_id: int, channel_id: str, days: int):
     """Предоставляет доступ к каналу"""
     try:
-        # Разбаниваем пользователя
-        await bot.unban_chat_member(int(channel_id), user_id)
+        # Проверяем, не является ли пользователь владельцем/админом канала
+        try:
+            chat_member = await bot.get_chat_member(int(channel_id), user_id)
+            if chat_member.status in ['creator', 'administrator']:
+                # Пользователь уже админ - пропускаем разбан
+                logger.info(f"Пользователь {user_id} уже является админом канала {channel_id}")
+        except:
+            pass  # Если не можем получить информацию о пользователе
+        
+        # Пытаемся разбанить (если пользователь не админ)
+        try:
+            await bot.unban_chat_member(int(channel_id), user_id)
+        except Exception as e:
+            logger.info(f"Не удалось разбанить пользователя {user_id}: {e}")
+            # Это нормально если пользователь уже не забанен или является админом
         
         # Создаем одноразовую ссылку
         invite = await bot.create_chat_invite_link(
@@ -554,6 +587,19 @@ async def cmd_myaccess(message: Message):
     else:
         await message.answer("📭 У вас нет активных доступов к каналам")
 
+@dp.message(Command("check_access"))
+async def cmd_check_access(message: Message):
+    """Принудительная проверка просроченных доступов"""
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("🚫 Доступ запрещен")
+        return
+    
+    try:
+        await check_expired_access()
+        await message.answer("✅ Проверка доступов выполнена. Результаты в логах.")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка проверки: {e}")
+
 # Обработчики кнопок
 @dp.callback_query(F.data.startswith("buy_file:"))
 async def buy_file_callback(callback: types.CallbackQuery):
@@ -758,7 +804,7 @@ async def process_buttons_choice(callback: types.CallbackQuery, state: FSMContex
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
                 [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
-                [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
+ [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
                 [InlineKeyboardButton(text="✅ Готово", callback_data="button_type_done")]
             ])
             await state.set_state(PostStates.waiting_button_type)
@@ -946,7 +992,7 @@ async def offer_more_buttons(message: Message, state: FSMContext):
 
 @dp.callback_query(PostStates.waiting_button_type, F.data == "button_type_done")
 async def process_buttons_done(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка завершения добавления кнопок"""
+    """Обработка завершения добавления кнопки"""
     await process_final_post(callback.message, state)
     await callback.answer()
 
@@ -1058,24 +1104,53 @@ async def universal_webhook(request: Request):
             
         elif payment_type == "channel":
             # Обработка оплаты доступа к каналу
-            invite_link = await grant_channel_access(int(user_id), target_id, days)
-            
-            # Отправляем ссылку
-            period = "навсегда" if days == 0 else f"{days} дней"
-            await bot.send_message(
-                user_id,
-                f"✅ Оплата доступа к каналу прошла успешно! Доступ предоставлен на {period}.\n"
-                f"Вот ваша ссылка для входа: {invite_link}"
-            )
-            
-            # Уведомляем админа
-            await bot.send_message(
-                ADMIN_ID,
-                f"💰 Пользователь {user_id} оплатил доступ к каналу\n"
-                f"📢 Канал: {target_id}\n"
-                f"⏰ Срок: {period}\n"
-                f"💳 Сумма: {data.get('amount', 'N/A')}₽"
-            )
+            try:
+                invite_link = await grant_channel_access(int(user_id), target_id, days)
+                
+                # Отправляем ссылку
+                period = "навсегда" if days == 0 else f"{days} дней"
+                await bot.send_message(
+                    user_id,
+                    f"✅ Оплата доступа к каналу прошла успешно! Доступ предоставлен на {period}.\n"
+                    f"Вот ваша ссылка для входа: {invite_link}"
+                )
+                
+                # Уведомляем админа
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"💰 Пользователь {user_id} оплатил доступ к каналу\n"
+                    f"📢 Канал: {target_id}\n"
+                    f"⏰ Срок: {period}\n"
+                    f"💳 Сумма: {data.get('amount', 'N/A')}₽"
+                )
+                
+            except Exception as e:
+                # Если ошибка, но пользователь уже админ - все равно отправляем ссылку
+                if "can't remove chat owner" in str(e) or "administrator" in str(e):
+                    logger.info(f"Пользователь {user_id} уже админ канала {target_id}")
+                    
+                    # Все равно создаем ссылку
+                    invite = await bot.create_chat_invite_link(
+                        chat_id=int(target_id),
+                        expire_date=None,
+                        member_limit=1
+                    )
+                    
+                    await bot.send_message(
+                        user_id,
+                        f"✅ Оплата принята! Вы уже являетесь администратором канала.\n"
+                        f"Ссылка для входа: {invite.invite_link}"
+                    )
+                    
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"💰 Администратор {user_id} оплатил доступ к каналу\n"
+                        f"📢 Канал: {target_id}\n"
+                        f"⏰ Срок: {days} дней\n"
+                        f"💳 Сумма: {data.get('amount', 'N/A')}₽"
+                    )
+                else:
+                    raise  # Другие ошибки пробрасываем дальше
         
         return {"status": "success"}
         
