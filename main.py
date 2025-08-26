@@ -15,7 +15,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage import MemoryStorage
+from aiogram.fsm.storage.memory import MemoryStorage
 import gspread
 from google.oauth2.service_account import Credentials
 
