@@ -834,7 +834,7 @@ async def universal_webhook(request: Request):
         
         return {"status": "success"}
         
-       except Exception as e:
+    except Exception as e:
         logger.error(f"Ошибка вебхука: {e}", exc_info=True)
         await bot.send_message(ADMIN_ID, f"🚨 Ошибка вебхука: {e}\n\nДанные: {data}")
         return {"status": "error", "message": str(e)}
