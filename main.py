@@ -170,6 +170,7 @@ async def send_file_to_user(user_id: int, file_id: str, caption: str = "Ваш �
 # === Проверка и удаление просроченных доступов ===
 async def check_expired_access():
     now = datetime.now()
+    logger.info(f"🔍 [ПРОВЕРКА] Начало проверки в {now}")
     
     # Проверка файлов
     expired_files = []
@@ -177,21 +178,26 @@ async def check_expired_access():
         for file_id, expiry in files.items():
             if isinstance(expiry, datetime) and now >= expiry:
                 expired_files.append((user_id, file_id))
+                logger.info(f"📁 [ПРОСРОЧКА] Файл {file_id} у пользователя {user_id}")
     
     for user_id, file_id in expired_files:
         try:
             del paid_files[user_id][file_id]
             if not paid_files[user_id]:
                 del paid_files[user_id]
+            logger.info(f"✅ [УДАЛЕНО] Файл {file_id} у пользователя {user_id}")
         except Exception as e:
             logger.error(f"Ошибка при удалении доступа к файлу: {e}")
     
-    # Проверка доступа к каналам (обновленная логика)
+    # Проверка доступа к каналам
     expired_channels = []
     for user_id, channels in channel_access.items():
         for channel_id, expiry in channels.items():
             if isinstance(expiry, datetime) and now >= expiry:
                 expired_channels.append((user_id, channel_id))
+                logger.info(f"📢 [ПРОСРОЧКА] Канал {channel_id} у пользователя {user_id}")
+            elif expiry == "forever":
+                logger.info(f"✅ [БЕССРОЧНЫЙ] Канал {channel_id} у пользователя {user_id}")
     
     for user_id, channel_id in expired_channels:
         try:
@@ -222,23 +228,38 @@ async def check_expired_access():
                                     if not acc.startswith(f"{channel_id}:")
                                 ]
                                 ws.update_cell(idx, 10, ';'.join(new_accesses))
+                                logger.info(f"✅ [GSHEET] Удален доступ к {channel_id} для {user_id}")
                             break
                 except Exception as e:
                     logger.error(f"Ошибка удаления доступа из Google Sheets: {e}")
                 
-            logger.info(f"Пользователь {user_id} удалён из канала {channel_id}")
+            logger.info(f"✅ [УДАЛЕНО] Пользователь {user_id} удалён из канала {channel_id}")
         except Exception as e:
-            logger.error(f"Ошибка при удалении доступа к каналу: {e}")
+            logger.error(f"❌ [ОШИБКА] При удалении доступа к каналу: {e}")
+            # Если ошибка прав, попробуем хотя бы удалить из базы
+            try:
+                del channel_access[user_id][channel_id]
+                if not channel_access[user_id]:
+                    del channel_access[user_id]
+                logger.info(f"✅ [БАЗА] Пользователь {user_id} удален из базы (канал {channel_id})")
+            except:
+                pass
     
     if expired_files or expired_channels:
         save_data()
+        logger.info(f"💾 [СОХРАНЕНО] Данные обновлены")
+    
+    logger.info(f"🔍 [ПРОВЕРКА] Завершена. Найдено: {len(expired_files)} файлов, {len(expired_channels)} каналов")
 
 # === Фоновая проверка ===
 def access_watcher():
     logger.info("[WATCHER] Запущен мониторинг доступов")
     while True:
-        import asyncio
-        asyncio.run(check_expired_access())
+        try:
+            import asyncio
+            asyncio.run(check_expired_access())
+        except Exception as e:
+            logger.error(f"❌ [WATCHER] Ошибка: {e}")
         time.sleep(60)
 
 # === Генерация ссылок на оплату ===
@@ -643,6 +664,43 @@ async def cmd_myaccess(message: Message):
         )
     else:
         await message.answer("📭 У вас нет активных доступов к каналам")
+
+# Новые команды для отладки
+@dp.message(Command("force_check"))
+async def cmd_force_check(message: Message):
+    """Принудительная проверка доступов"""
+    if message.from_user.id != ADMIN_ID:
+        return
+        
+    await check_expired_access()
+    await message.answer("🔍 Принудительная проверка выполнена!")
+
+@dp.message(Command("debug_time"))
+async def cmd_debug_time(message: Message):
+    """Показать текущее время сервера"""
+    now = datetime.now()
+    await message.answer(
+        f"⏰ Время сервера: {now}\n"
+        f"📅 Дата: {now.date()}\n"
+        f"🕒 Время: {now.time()}\n"
+        f"📊 Channel access: {len(channel_access)} пользователей"
+    )
+
+@dp.message(Command("debug_access"))
+async def cmd_debug_access(message: Message):
+    """Показать все доступы"""
+    if message.from_user.id != ADMIN_ID:
+        return
+        
+    debug_info = []
+    for user_id, channels in channel_access.items():
+        for channel_id, expiry in channels.items():
+            debug_info.append(f"👤 {user_id} -> 📢 {channel_id} -> ⏰ {expiry}")
+    
+    if debug_info:
+        await message.answer("\n".join(debug_info)[:4000])
+    else:
+        await message.answer("📭 Нет активных доступов")
 
 # Обработчики кнопок
 @dp.callback_query(F.data.startswith("buy_file:"))
