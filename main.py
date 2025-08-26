@@ -15,7 +15,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage import MemoryStorage
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -25,6 +25,12 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
 GSHEET_ID = os.getenv("GSHEET_ID")
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 USERS_FILE = "paid_users.json"
+CHANNEL_ACCESS_FILE = "channel_access.json"
+
+# Основные каналы
+CHANNELS = {
+    "main": "-1002681575953",  # Основной канал "Меняя реальность"
+}
 
 # Проверка переменных
 if not all([BOT_TOKEN, GSHEET_ID]):
@@ -49,122 +55,12 @@ app = FastAPI()
 # Хранилища
 paid_files = {}
 file_id_mapping = {}
-
-# === Функции для работы с Google Sheets ===
-def get_gsheet():
-    """Подключается к Google Sheets и возвращает worksheet"""
-    try:
-        creds_path = '/etc/secrets/GSPREAD_CREDENTIALS.json'
-        creds = Credentials.from_service_account_file(creds_path, scopes=[
-            "https://www.googleapis.com/auth/spreadsheets"
-        ])
-        gc = gspread.authorize(creds)
-        sh = gc.open_by_key(GSHEET_ID)
-        return sh.sheet1
-    except Exception as e:
-        logger.error(f"Ошибка подключения к Google Sheets: {e}")
-        return None
-
-async def save_channel_access(user_id: int, channel_id: str, days: int):
-    """Сохраняет доступ к каналу в Google Sheets"""
-    ws = get_gsheet()
-    if not ws:
-        return None
-    
-    try:
-        # Вычисляем дату истечения
-        if days == 0:
-            expiry_date = "forever"
-        else:
-            expiry_date = (datetime.now() + timedelta(days=days)).isoformat()
-        
-        # Формат: channel_id|expiry_date
-        access_data = f"{channel_id}|{expiry_date}"
-        
-        # Ищем пользователя в таблице
-        records = ws.get_all_records()
-        row_index = 2  # Начинаем со 2 строки (после заголовков)
-        
-        for record in records:
-            if str(record.get("id", "")) == str(user_id):
-                # Обновляем колонку L (channel_access)
-                ws.update(f'L{row_index}', [[access_data]])
-                logger.info(f"Доступ сохранен в Google Sheets: user {user_id} -> {access_data}")
-                return expiry_date
-            row_index += 1
-        
-        # Если пользователь не найден, добавляем новую строку
-        new_row = [user_id, "", "", "", "", "", "", "", "", "", "", access_data]
-        ws.append_row(new_row)
-        logger.info(f"Добавлен новый пользователь с доступом: {access_data}")
-        return expiry_date
-        
-    except Exception as e:
-        logger.error(f"Ошибка сохранения доступа в Google Sheets: {e}")
-        return None
-
-async def check_expired_access_gsheets():
-    """Проверяет просроченные доступы из Google Sheets"""
-    ws = get_gsheet()
-    if not ws:
-        return
-    
-    now = datetime.now()
-    logger.info(f"[WATCHER] Проверка доступов из Google Sheets в {now}")
-    
-    try:
-        records = ws.get_all_records()
-        row_index = 2
-        
-        for record in records:
-            user_id = str(record.get("id", ""))
-            access_data = record.get("channel_access", "").strip()
-            
-            if access_data and "|" in access_data:
-                channel_id, expiry_str = access_data.split("|", 1)
-                
-                if expiry_str != "forever":
-                    try:
-                        expiry_date = datetime.fromisoformat(expiry_str)
-                        if now >= expiry_date:
-                            # УДАЛЯЕМ ПОЛЬЗОВАТЕЛЯ
-                            await bot.ban_chat_member(int(channel_id), int(user_id))
-                            await bot.unban_chat_member(int(channel_id), int(user_id))
-                            
-                            # Очищаем запись в таблице
-                            ws.update(f'L{row_index}', [[""]])
-                            
-                            # Уведомляем пользователя
-                            await bot.send_message(int(user_id), "⏰ Срок вашего доступа к каналу истёк. Для продления оплатите подписку снова.")
-                            
-                            logger.info(f"Удален user {user_id} из channel {channel_id}")
-                    except ValueError:
-                        logger.error(f"Неверный формат даты: {expiry_str}")
-            
-            row_index += 1
-        
-        logger.info("Проверка доступов завершена")
-        
-    except Exception as e:
-        logger.error(f"Ошибка проверки доступов из Google Sheets: {e}")
-
-# === Фоновая проверка ===
-def access_watcher():
-    logger.info("[WATCHER] Запущен мониторинг доступов из Google Sheets")
-    while True:
-        try:
-            import asyncio
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(check_expired_access_gsheets())
-            loop.close()
-        except Exception as e:
-            logger.error(f"Ошибка в мониторинге доступов: {e}")
-        time.sleep(60)
+channel_access = {}  # {user_id: {channel_id: expiry_date}}
 
 # === Загрузка/сохранение данных ===
 def load_data():
-    global paid_files
+    global paid_files, channel_access
+    # Загрузка оплаченных файлов
     if os.path.exists(USERS_FILE):
         try:
             with open(USERS_FILE, "r") as f:
@@ -176,8 +72,54 @@ def load_data():
         except Exception as e:
             logger.error(f"Ошибка загрузки файлов оплаты: {e}")
             paid_files = {}
+    
+    # Загрузка доступа к каналам из Google Sheets
+    channel_access = {}
+    if ws:
+        try:
+            records = ws.get_all_values()
+            for row in records[1:]:  # пропускаем заголовок
+                if len(row) > 9 and row[9]:  # channel_access в 10-м столбце
+                    user_id = str(row[0])
+                    accesses = row[9].split(';')
+                    
+                    if user_id not in channel_access:
+                        channel_access[user_id] = {}
+                    
+                    for access in accesses:
+                        if ':' in access:
+                            channel_id, expiry_str = access.split(':', 1)
+                            if expiry_str == "forever":
+                                channel_access[user_id][channel_id] = "forever"
+                            else:
+                                try:
+                                    channel_access[user_id][channel_id] = datetime.fromisoformat(expiry_str)
+                                except ValueError:
+                                    logger.error(f"Неверный формат даты: {expiry_str}")
+            
+            logger.info(f"Загружено {sum(len(v) for v in channel_access.values())} доступов к каналам из Google Sheets")
+        except Exception as e:
+            logger.error(f"Ошибка загрузки доступа к каналам из Google Sheets: {e}")
+    
+    # Дополнительная загрузка из локального файла (для обратной совместимости)
+    if os.path.exists(CHANNEL_ACCESS_FILE):
+        try:
+            with open(CHANNEL_ACCESS_FILE, "r") as f:
+                local_access = json.load(f)
+                for user_id, channels in local_access.items():
+                    if user_id not in channel_access:
+                        channel_access[user_id] = {}
+                    
+                    for channel_id, expiry_str in channels.items():
+                        if expiry_str != "forever":
+                            channel_access[user_id][channel_id] = datetime.fromisoformat(expiry_str)
+                        else:
+                            channel_access[user_id][channel_id] = "forever"
+        except Exception as e:
+            logger.error(f"Ошибка загрузки доступа к каналам из локального файла: {e}")
 
 def save_data():
+    # Сохранение оплаченных файлов
     try:
         save_files = {}
         for user_id, files in paid_files.items():
@@ -189,6 +131,19 @@ def save_data():
             json.dump(save_files, f)
     except Exception as e:
         logger.error(f"Ошибка сохранения файлов оплаты: {e}")
+    
+    # Сохранение доступа к каналам в локальный файл (оставляем для резервной копии)
+    try:
+        save_access = {}
+        for user_id, channels in channel_access.items():
+            save_access[user_id] = {}
+            for channel_id, expiry in channels.items():
+                save_access[user_id][channel_id] = expiry.isoformat() if isinstance(expiry, datetime) else expiry
+        
+        with open(CHANNEL_ACCESS_FILE, "w") as f:
+            json.dump(save_access, f)
+    except Exception as e:
+        logger.error(f"Ошибка сохранения доступа к каналам: {e}")
 
 # === Универсальная функция отправки файла ===
 async def send_file_to_user(user_id: int, file_id: str, caption: str = "Ваш файл"):
@@ -211,6 +166,80 @@ async def send_file_to_user(user_id: int, file_id: str, caption: str = "Ваш �
                 except Exception as audio_error:
                     logger.error(f"Не удалось отправить файл {file_id}: {doc_error}, {photo_error}, {video_error}, {audio_error}")
                     await bot.send_message(user_id, "❌ Не удалось отправить файл. Свяжитесь с администратором.")
+
+# === Проверка и удаление просроченных доступов ===
+async def check_expired_access():
+    now = datetime.now()
+    
+    # Проверка файлов
+    expired_files = []
+    for user_id, files in paid_files.items():
+        for file_id, expiry in files.items():
+            if isinstance(expiry, datetime) and now >= expiry:
+                expired_files.append((user_id, file_id))
+    
+    for user_id, file_id in expired_files:
+        try:
+            del paid_files[user_id][file_id]
+            if not paid_files[user_id]:
+                del paid_files[user_id]
+        except Exception as e:
+            logger.error(f"Ошибка при удалении доступа к файлу: {e}")
+    
+    # Проверка доступа к каналам (обновленная логика)
+    expired_channels = []
+    for user_id, channels in channel_access.items():
+        for channel_id, expiry in channels.items():
+            if isinstance(expiry, datetime) and now >= expiry:
+                expired_channels.append((user_id, channel_id))
+    
+    for user_id, channel_id in expired_channels:
+        try:
+            # Кикаем пользователя из канала
+            await bot.ban_chat_member(int(channel_id), int(user_id))
+            await bot.unban_chat_member(int(channel_id), int(user_id))
+            
+            # Уведомляем пользователя
+            await bot.send_message(int(user_id), f"⏰ Срок вашего доступа к каналу истёк. Для продления оплатите подписку снова.")
+            
+            # Удаляем из хранилища
+            del channel_access[user_id][channel_id]
+            if not channel_access[user_id]:
+                del channel_access[user_id]
+            
+            # Удаляем из Google Sheets
+            if ws:
+                try:
+                    records = ws.get_all_values()
+                    for idx, row in enumerate(records[1:], start=2):
+                        if str(row[0]) == user_id:  # находим пользователя
+                            current_access = row[9] if len(row) > 9 else ""  # channel_access в 10-м столбце
+                            if current_access:
+                                # Удаляем конкретный канал из списка
+                                accesses = current_access.split(';')
+                                new_accesses = [
+                                    acc for acc in accesses 
+                                    if not acc.startswith(f"{channel_id}:")
+                                ]
+                                ws.update_cell(idx, 10, ';'.join(new_accesses))
+                            break
+                except Exception as e:
+                    logger.error(f"Ошибка удаления доступа из Google Sheets: {e}")
+                
+            logger.info(f"Пользователь {user_id} удалён из канала {channel_id}")
+        except Exception as e:
+            logger.error(f"Ошибка при удалении доступа к каналу: {e}")
+    
+    if expired_files or expired_channels:
+        save_data()
+
+# === Фоновая проверка ===
+def access_watcher():
+    logger.info("[WATCHER] Запущен мониторинг доступов")
+    while True:
+        import asyncio
+        asyncio.run(check_expired_access())
+        time.sleep(60)
 
 # === Генерация ссылок на оплату ===
 def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name: str):
@@ -339,19 +368,8 @@ def extract_payment_info(data: dict) -> tuple:
 async def grant_channel_access(user_id: int, channel_id: str, days: int):
     """Предоставляет доступ к каналу и сохраняет в Google Sheets"""
     try:
-        # Проверяем, не является ли пользователь владельцем/админом канала
-        try:
-            chat_member = await bot.get_chat_member(int(channel_id), user_id)
-            if chat_member.status in ['creator', 'administrator']:
-                logger.info(f"Пользователь {user_id} уже является админом канала {channel_id}")
-        except:
-            pass  # Если не можем получить информацию о пользователе
-        
-        # Пытаемся разбанить (если пользователь не админ)
-        try:
-            await bot.unban_chat_member(int(channel_id), user_id)
-        except Exception as e:
-            logger.info(f"Не удалось разбанить пользователя {user_id}: {e}")
+        # Разбаниваем пользователя
+        await bot.unban_chat_member(int(channel_id), user_id)
         
         # Создаем одноразовую ссылку
         invite = await bot.create_chat_invite_link(
@@ -360,14 +378,75 @@ async def grant_channel_access(user_id: int, channel_id: str, days: int):
             member_limit=1
         )
         
+        # Сохраняем доступ в памяти
+        if str(user_id) not in channel_access:
+            channel_access[str(user_id)] = {}
+        
+        if days == 0:  # навсегда
+            channel_access[str(user_id)][channel_id] = "forever"
+            expiry_date = "forever"
+        else:
+            expiry_date = datetime.now() + timedelta(days=days)
+            channel_access[str(user_id)][channel_id] = expiry_date
+        
         # Сохраняем доступ в Google Sheets
-        expiry_date = await save_channel_access(user_id, channel_id, days)
+        if ws:
+            try:
+                # Находим запись пользователя
+                records = ws.get_all_values()
+                for idx, row in enumerate(records[1:], start=2):  # пропускаем заголовок
+                    if str(row[0]) == str(user_id):  # проверяем ID в первом столбце
+                        # Обновляем channel_access (10-й столбец, индекс 9)
+                        current_access = row[9] if len(row) > 9 else ""
+                        new_access = f"{channel_id}:{expiry_date}"
+                        
+                        if current_access:
+                            # Проверяем, есть ли уже доступ к этому каналу
+                            accesses = current_access.split(';')
+                            updated = False
+                            for i, acc in enumerate(accesses):
+                                if acc.startswith(f"{channel_id}:"):
+                                    accesses[i] = new_access
+                                    updated = True
+                                    break
+                            
+                            if not updated:
+                                accesses.append(new_access)
+                            
+                            ws.update_cell(idx, 10, ';'.join(accesses))
+                        else:
+                            ws.update_cell(idx, 10, new_access)
+                        break
+                else:
+                    # Если пользователь не найден, создаем новую запись
+                    ws.append_row([
+                        user_id, "", "", "", "", "", "", "", "", 
+                        f"{channel_id}:{expiry_date}"
+                    ])
+            except Exception as e:
+                logger.error(f"Ошибка сохранения доступа в Google Sheets: {e}")
+        
+        save_data()
         
         return invite.invite_link
         
     except Exception as e:
         logger.error(f"Ошибка предоставления доступа к каналу: {e}")
         raise
+
+# Подключение к Google Sheets
+try:
+    creds_path = '/etc/secrets/GSPREAD_CREDENTIALS.json'
+    creds = Credentials.from_service_account_file(creds_path, scopes=[
+        "https://www.googleapis.com/auth/spreadsheets"
+    ])
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(GSHEET_ID)
+    ws = sh.sheet1
+    logger.info("Успешное подключение к Google Sheets!")
+except Exception as e:
+    logger.error(f"Ошибка Google Sheets: {e}")
+    ws = None
 
 # Клавиатуры
 def admin_kb() -> InlineKeyboardMarkup:
@@ -453,7 +532,6 @@ class PostStates(StatesGroup):
 
 # Регистрация пользователя
 async def register_user(user: types.User):
-    ws = get_gsheet()
     if not ws:
         return
         
@@ -476,8 +554,6 @@ async def register_user(user: types.User):
                 "",  # post_text
                 "",  # post_photo
                 "",  # post_buttons
-                "",  # button_type
-                "",  # button_data
                 ""   # channel_access
             ])
             logger.info(f"Зарегистрирован новый пользователь: {user_id}")
@@ -489,7 +565,6 @@ async def register_user(user: types.User):
 async def cmd_start(message: Message):
     try:
         await register_user(message.from_user)
-        ws = get_gsheet()
         records = ws.get_all_records() if ws else []
         posts = [p for p in records if str(p.get("post_id", "")).strip()]
         
@@ -552,90 +627,22 @@ async def cmd_myfiles(message: Message):
 
 @dp.message(Command("myaccess"))
 async def cmd_myaccess(message: Message):
-    """Показать активные доступы пользователя из Google Sheets"""
+    """Показать активные доступы пользователя"""
     user_id = str(message.from_user.id)
-    ws = get_gsheet()
     
-    if not ws:
-        await message.answer("❌ База данных недоступна")
-        return
-    
-    try:
-        records = ws.get_all_records()
+    if user_id in channel_access and channel_access[user_id]:
         access_list = []
+        for channel_id, expiry in channel_access[user_id].items():
+            status = "✅ Бессрочный" if expiry == "forever" else f"⏰ До {expiry.strftime('%d.%m.%Y %H:%M')}"
+            channel_name = next((name for name, cid in CHANNELS.items() if cid == channel_id), channel_id)
+            access_list.append(f"📢 {channel_name} - {status}")
         
-        for record in records:
-            if str(record.get("id", "")) == user_id:
-                access_data = record.get("channel_access", "").strip()
-                if access_data and "|" in access_data:
-                    channel_id, expiry_str = access_data.split("|", 1)
-                    if expiry_str == "forever":
-                        status = "✅ Бессрочный"
-                    else:
-                        try:
-                            expiry_date = datetime.fromisoformat(expiry_str)
-                            status = f"⏰ До {expiry_date.strftime('%d.%m.%Y %H:%M')}"
-                        except:
-                            status = "❌ Ошибка даты"
-                    
-                    access_list.append(f"📢 {channel_id} - {status}")
-        
-        if access_list:
-            await message.answer(
-                "🔐 Ваши активные доступы:\n\n" + "\n".join(access_list) +
-                "\n\nНажмите на кнопку канала в посте для получения ссылки"
-            )
-        else:
-            await message.answer("📭 У вас нет активных доступов к каналам")
-            
-    except Exception as e:
-        logger.error(f"Ошибка получения доступов: {e}")
-        await message.answer("❌ Ошибка получения информации о доступах")
-
-@dp.message(Command("check_access"))
-async def cmd_check_access(message: Message):
-    """Принудительная проверка просроченных доступов"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Доступ запрещен")
-        return
-    
-    try:
-        await check_expired_access_gsheets()
-        await message.answer("✅ Проверка доступов выполнена. Результаты в логах.")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка проверки: {e}")
-
-@dp.message(Command("show_access"))
-async def cmd_show_access(message: Message):
-    """Показать все доступы из Google Sheets"""
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("🚫 Доступ запрещен")
-        return
-    
-    ws = get_gsheet()
-    if not ws:
-        await message.answer("❌ База данных недоступна")
-        return
-    
-    try:
-        records = ws.get_all_records()
-        access_list = []
-        
-        for record in records:
-            user_id = str(record.get("id", ""))
-            access_data = record.get("channel_access", "").strip()
-            
-            if access_data and "|" in access_data:
-                channel_id, expiry_str = access_data.split("|", 1)
-                access_list.append(f"👤 {user_id} → 📢 {channel_id} → ⏰ {expiry_str}")
-        
-        if access_list:
-            await message.answer("🔐 Все доступы из Google Sheets:\n\n" + "\n".join(access_list))
-        else:
-            await message.answer("📭 Нет активных доступов")
-            
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await message.answer(
+            "🔐 Ваши активные доступы:\n\n" + "\n".join(access_list) +
+            "\n\nНажмите на кнопку канала в посте для получения ссылки"
+        )
+    else:
+        await message.answer("📭 У вас нет активных доступов к каналам")
 
 # Обработчики кнопок
 @dp.callback_query(F.data.startswith("buy_file:"))
@@ -699,25 +706,18 @@ async def buy_channel_callback(callback: types.CallbackQuery):
         days = int(parts[3])
         user_id = str(callback.from_user.id)
         
-        # Проверяем, есть ли уже доступ в Google Sheets
-        ws = get_gsheet()
-        if ws:
-            records = ws.get_all_records()
-            for record in records:
-                if str(record.get("id", "")) == user_id:
-                    access_data = record.get("channel_access", "").strip()
-                    if access_data and "|" in access_data:
-                        existing_channel, expiry_str = access_data.split("|", 1)
-                        if existing_channel == channel_id:
-                            if expiry_str == "forever" or (expiry_str != "forever" and datetime.now() < datetime.fromisoformat(expiry_str)):
-                                # Обновляем ссылку
-                                invite_link = await grant_channel_access(callback.from_user.id, channel_id, days)
-                                await callback.message.answer(
-                                    f"✅ У вас уже есть доступ к каналу!\n"
-                                    f"Новая ссылка: {invite_link}"
-                                )
-                                await callback.answer()
-                                return
+        # Проверяем, есть ли уже доступ
+        if user_id in channel_access and channel_id in channel_access[user_id]:
+            expiry = channel_access[user_id][channel_id]
+            if expiry == "forever" or (isinstance(expiry, datetime) and datetime.now() < expiry):
+                # Обновляем ссылку
+                invite_link = await grant_channel_access(callback.from_user.id, channel_id, days)
+                await callback.message.answer(
+                    f"✅ У вас уже есть доступ к каналу!\n"
+                    f"Новая ссылка: {invite_link}"
+                )
+                await callback.answer()
+                return
         
         # Предлагаем оплатить
         payment_url = generate_channel_payment_link(callback.from_user.id, channel_id, int(price), days)
@@ -738,7 +738,371 @@ async def buy_channel_callback(callback: types.CallbackQuery):
         logger.error(f"Ошибка обработки покупки канала: {e}")
         await callback.answer("❌ Ошибка при обработке запроса")
 
-# ... (остальные обработчики остаются без изменений) ...
+@dp.callback_query(F.data == "add_post")
+async def add_post_callback(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+    
+    await state.set_state(PostStates.waiting_text)
+    await callback.message.answer("📝 Введите текст поста:")
+    await callback.answer()
+
+@dp.callback_query(F.data == "list_posts")
+async def list_posts_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+        
+    posts = ws.get_all_records() if ws else []
+    posts = [p for p in posts if str(p.get("post_id", "")).strip()]
+    
+    if not posts:
+        await callback.message.answer("📭 Нет постов для отображения")
+        return
+        
+    for post in posts:
+        text = post.get("post_text", "Без текста")
+        photo_id = post.get("post_photo", "").strip()
+        post_id = post.get("post_id", "N/A")
+        buttons_data = post.get("post_buttons", "").strip()
+        
+        keyboard = create_buttons_keyboard(buttons_data)
+        
+        try:
+            if photo_id:
+                await callback.message.answer_photo(
+                    photo_id,
+                    caption=f"{text}\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
+                    reply_markup=keyboard if keyboard else delete_kb(post_id))
+            else:
+                await callback.message.answer(
+                    f"{text}\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
+                    reply_markup=keyboard if keyboard else delete_kb(post_id))
+        except Exception as e:
+            logger.error(f"Ошибка отправки поста {post_id}: {e}")
+            await callback.message.answer(
+                f"📄 {text[:300]}...\n\nID: {post_id}\nКнопки: {buttons_data if buttons_data else 'нет'}",
+                reply_markup=delete_kb(post_id))
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("delete_"))
+async def delete_post_callback(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("🚫 Нет доступа")
+        return
+        
+    post_id = callback.data.split("_")[1]
+    try:
+        if ws:
+            records = ws.get_all_values()
+            for idx, row in enumerate(records[1:], start=2):
+                if str(row[5]) == str(post_id):
+                    ws.delete_rows(idx)
+                    await callback.message.delete()
+                    await callback.answer("✅ Пост удален")
+                    return
+        await callback.answer("❌ Пост не найден")
+    except Exception as e:
+        logger.error(f"Ошибка удаления: {e}")
+        await callback.answer("⚠️ Ошибка удаления")
+
+# Обработчики состояний
+@dp.message(PostStates.waiting_text)
+async def process_post_text(message: Message, state: FSMContext):
+    await state.update_data(text=message.text)
+    await state.set_state(PostStates.waiting_photo)
+    await message.answer("📷 Отправьте фото или напишите 'пропустить':")
+
+@dp.message(PostStates.waiting_photo)
+async def process_post_photo(message: Message, state: FSMContext):
+    try:
+        if message.photo:
+            await state.update_data(photo_id=message.photo[-1].file_id)
+        elif message.text and message.text.lower() == "пропустить":
+            await state.update_data(photo_id="")
+        else:
+            await message.answer("❌ Отправьте фото или напишите 'пропустить'")
+            return
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да", callback_data="add_buttons_yes")],
+            [InlineKeyboardButton(text="❌ Нет", callback_data="add_buttons_no")]
+        ])
+        
+        await state.set_state(PostStates.waiting_buttons_choice)
+        await message.answer("📌 Хотите добавить кнопки к посту?", reply_markup=keyboard)
+            
+    except Exception as e:
+        logger.error(f"Ошибка обработки фото: {e}")
+        await message.answer("❌ Ошибка обработки")
+        await state.clear()
+
+@dp.callback_query(PostStates.waiting_buttons_choice, F.data.in_(["add_buttons_yes", "add_buttons_no"]))
+async def process_buttons_choice(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        if callback.data == "add_buttons_no":
+            await state.update_data(buttons="нет")
+            await process_final_post(callback.message, state)
+        else:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
+                [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
+                [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
+                [InlineKeyboardButton(text="✅ Готово", callback_data="button_type_done")]
+            ])
+            await state.set_state(PostStates.waiting_button_type)
+            await state.update_data(buttons_data=[])
+            await callback.message.answer("🎛 Выберите тип кнопки:", reply_markup=keyboard)
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка выбора кнопок: {e}")
+        await callback.message.answer("❌ Ошибка")
+
+@dp.callback_query(PostStates.waiting_button_type, F.data.startswith("button_type_"))
+async def process_button_type(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        btn_type = callback.data.split("_")[2]
+        await state.update_data(current_button_type=btn_type)
+        
+        if btn_type in ["file", "channel", "url"]:
+            await state.set_state(PostStates.waiting_button_text)
+            await callback.message.answer("📝 Введите текст для кнопки:")
+        elif btn_type == "done":
+            await process_final_post(callback.message, state)
+        
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"Ошибка выбора типа: {e}")
+        await callback.message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_text)
+async def process_button_text(message: Message, state: FSMContext):
+    try:
+        await state.update_data(current_button_text=message.text)
+        data = await state.get_data()
+        btn_type = data.get("current_button_type")
+        
+        if btn_type in ["file", "channel"]:
+            await state.set_state(PostStates.waiting_button_price)
+            await message.answer("💰 Введите цену в рублях:")
+        elif btn_type == "url":
+            await state.set_state(PostStates.waiting_button_url)
+            await message.answer("🔗 Введите URL:")
+            
+    except Exception as e:
+        logger.error(f"Ошибка текста кнопки: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_price)
+async def process_button_price(message: Message, state: FSMContext):
+    try:
+        price = message.text.strip()
+        if not price.isdigit():
+            await message.answer("❌ Введите корректную цену (число):")
+            return
+            
+        await state.update_data(current_button_price=price)
+        data = await state.get_data()
+        btn_type = data.get("current_button_type")
+        
+        if btn_type == "file":
+            await state.set_state(PostStates.waiting_button_file)
+            await message.answer("📎 Отправьте файл для продажи:")
+        elif btn_type == "channel":
+            await state.set_state(PostStates.waiting_button_channel)
+            await message.answer("🔗 Введите ID канала (например: -1002681575953):")
+        elif btn_type == "url":
+            await state.set_state(PostStates.waiting_button_url)
+            await message.answer("🔗 Введите URL:")
+            
+    except Exception as e:
+        logger.error(f"Ошибка цены: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_channel)
+async def process_button_channel(message: Message, state: FSMContext):
+    try:
+        channel_id = message.text.strip()
+        # Простая проверка формата (можно вводить любой ID)
+        if not channel_id.startswith('-100'):
+            await message.answer("⚠️ ID канала обычно начинается с -100...\nНо продолжаем...")
+        
+        await state.update_data(current_button_channel=channel_id)
+        await state.set_state(PostStates.waiting_button_days)
+        await message.answer("📅 Введите количество дней доступа (0 для бессрочного):")
+            
+    except Exception as e:
+        logger.error(f"Ошибка ID канала: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_days)
+async def process_button_days(message: Message, state: FSMContext):
+    try:
+        days_str = message.text.strip()
+        if not days_str.isdigit():
+            await message.answer("❌ Введите число дней (0 для бессрочного):")
+            return
+            
+        days = int(days_str)
+        
+        # Добавляем кнопку в список
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        btn_type = data.get("current_button_type")
+        text = data.get("current_button_text")
+        price = data.get("current_button_price")
+        channel_id = data.get("current_button_channel")
+        
+        # Используем новый формат: channel|текст|цена|channel_id|дни
+        buttons_data.append(f"channel|{text}|{price}|{channel_id}|{days}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка дней: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_file)
+async def process_button_file(message: Message, state: FSMContext):
+    try:
+        if not (message.document or message.photo):
+            await message.answer("❌ Отправьте файл или фото:")
+            return
+            
+        file_id = message.document.file_id if message.document else message.photo[-1].file_id
+        await state.update_data(current_button_file=file_id)
+        
+        # Добавляем кнопку в список
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        btn_type = data.get("current_button_type")
+        text = data.get("current_button_text")
+        price = data.get("current_button_price")
+        file_id = data.get("current_button_file")
+        
+        # Генерируем короткий ID и сохраняем маппинг
+        short_id = hash(file_id) % 10000
+        file_id_mapping[str(short_id)] = file_id
+        
+        # Используем новый формат: file|текст|цена|short_id
+        buttons_data.append(f"file|{text}|{price}|{short_id}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка файла: {e}")
+        await message.answer("❌ Ошибка")
+
+@dp.message(PostStates.waiting_button_url)
+async def process_button_url(message: Message, state: FSMContext):
+    try:
+        url = message.text.strip()
+        if not (url.startswith('http://') or url.startswith('https://')):
+            await message.answer("❌ URL должен начинаться с http:// или https://")
+            return
+        
+        # Добавляем кнопку в список
+        data = await state.get_data()
+        buttons_data = data.get("buttons_data", [])
+        text = data.get("current_button_text")
+        
+        # Правильный формат: url|текст|url_адрес
+        buttons_data.append(f"url|{text}|{url}")
+        await state.update_data(buttons_data=buttons_data)
+        
+        # Возвращаемся к выбору типа
+        await offer_more_buttons(message, state)
+            
+    except Exception as e:
+        logger.error(f"Ошибка URL: {e}")
+        await message.answer("❌ Ошибка")
+
+async def offer_more_buttons(message: Message, state: FSMContext):
+    """Предлагает добавить еще кнопки"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
+        [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
+        [InlineKeyboardButton(text="🔗 Обычная ссылка", callback_data="button_type_url")],
+        [InlineKeyboardButton(text="✅ Готово", callback_data="button_type_done")]
+    ])
+    await state.set_state(PostStates.waiting_button_type)
+    await message.answer("🎛 Добавить еще кнопку или завершить?", reply_markup=keyboard)
+
+@dp.callback_query(PostStates.waiting_button_type, F.data == "button_type_done")
+async def process_buttons_done(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка завершения добавления кнопок"""
+    await process_final_post(callback.message, state)
+    await callback.answer()
+
+async def process_final_post(message: Message, state: FSMContext):
+    """Финальное сохранение поста"""
+    try:
+        data = await state.get_data()
+        text = data.get("text", "")
+        photo_id = data.get("photo_id", "")
+        buttons_data = data.get("buttons_data", [])
+        
+        if ws:
+            records = ws.get_all_records()
+            
+            post_ids = []
+            for p in records:
+                try:
+                    post_id_str = str(p.get("post_id", "")).strip()
+                    if post_id_str:
+                        post_ids.append(int(post_id_str))
+                except (ValueError, AttributeError):
+                    continue
+            post_id = max(post_ids + [0]) + 1
+            
+            user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).strip()}
+            
+            # Сохраняем в таблицу (объединяем через |)
+            buttons_str = "|".join(buttons_data) if buttons_data else "нет"
+            ws.append_row(["", "", "", "", "", post_id, text, photo_id, buttons_str, ""])
+            # Создаем клавиатуру для рассылки
+            keyboard = create_buttons_keyboard(buttons_str)
+            
+            # Рассылаем пост
+            success = 0
+            for user_id in user_ids:
+                try:
+                    if photo_id:
+                        await bot.send_photo(
+                            user_id, 
+                            photo=photo_id, 
+                            caption=text,
+                            reply_markup=keyboard
+                        )
+                    else:
+                        await bot.send_message(
+                            user_id, 
+                            text=text,
+                            reply_markup=keyboard
+                        )
+                    success += 1
+                except Exception as e:
+                    logger.error(f"Не удалось отправить пост пользователю {user_id}: {e}")
+
+            await message.answer(
+                f"✅ Пост добавлен (ID: {post_id})\n"
+                f"Кнопки: {len(buttons_data)} шт.\n"
+                f"Отправлено: {success}/{len(user_ids)}"
+            )
+        else:
+            await message.answer("⚠️ База данных недоступна")
+            
+    except Exception as e:
+        logger.error(f"Ошибка добавления поста: {e}", exc_info=True)
+        await message.answer("❌ Ошибка при добавлении поста")
+    finally:
+        await state.clear()
 
 # === Универсальный вебхук для всех платежей ===
 @app.post("/webhook")
@@ -784,53 +1148,24 @@ async def universal_webhook(request: Request):
             
         elif payment_type == "channel":
             # Обработка оплаты доступа к каналу
-            try:
-                invite_link = await grant_channel_access(int(user_id), target_id, days)
-                
-                # Отправляем ссылку
-                period = "навсегда" if days == 0 else f"{days} дней"
-                await bot.send_message(
-                    user_id,
-                    f"✅ Оплата доступа к каналу прошла успешно! Доступ предоставлен на {period}.\n"
-                    f"Вот ваша ссылка для входа: {invite_link}"
-                )
-                
-                # Уведомляем админа
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"💰 Пользователь {user_id} оплатил доступ к каналу\n"
-                    f"📢 Канал: {target_id}\n"
-                    f"⏰ Срок: {period}\n"
-                    f"💳 Сумма: {data.get('amount', 'N/A')}₽"
-                )
-                
-            except Exception as e:
-                # Если ошибка, но пользователь уже админ - все равно отправляем ссылку
-                if "can't remove chat owner" in str(e) or "administrator" in str(e):
-                    logger.info(f"Пользователь {user_id} уже админ канала {target_id}")
-                    
-                    # Все равно создаем ссылку
-                    invite = await bot.create_chat_invite_link(
-                        chat_id=int(target_id),
-                        expire_date=None,
-                        member_limit=1
-                    )
-                    
-                    await bot.send_message(
-                        user_id,
-                        f"✅ Оплата принята! Вы уже являетесь администратором канала.\n"
-                        f"Ссылка для входа: {invite.invite_link}"
-                    )
-                    
-                    await bot.send_message(
-                        ADMIN_ID,
-                        f"💰 Администратор {user_id} оплатил доступ к каналу\n"
-                        f"📢 Канал: {target_id}\n"
-                        f"⏰ Срок: {days} дней\n"
-                        f"💳 Сумма: {data.get('amount', 'N/A')}₽"
-                    )
-                else:
-                    raise  # Другие ошибки пробрасываем дальше
+            invite_link = await grant_channel_access(int(user_id), target_id, days)
+            
+            # Отправляем ссылку
+            period = "навсегда" if days == 0 else f"{days} дней"
+            await bot.send_message(
+                user_id,
+                f"✅ Оплата доступа к каналу прошла успешно! Доступ предоставлен на {period}.\n"
+                f"Вот ваша ссылка для входа: {invite_link}"
+            )
+            
+            # Уведомляем админа
+            await bot.send_message(
+                ADMIN_ID,
+                f"💰 Пользователь {user_id} оплатил доступ к каналу\n"
+                f"📢 Канал: {target_id}\n"
+                f"⏰ Срок: {period}\n"
+                f"💳 Сумма: {data.get('amount', 'N/A')}₽"
+            )
         
         return {"status": "success"}
         
@@ -863,7 +1198,7 @@ async def telegram_webhook(request: Request):
 
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "paid_files_count": len(paid_files)}
+    return {"status": "ok", "sheets": bool(ws), "paid_files_count": len(paid_files), "channel_access_count": len(channel_access)}
 
 if __name__ == "__main__":
     import uvicorn
