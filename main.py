@@ -118,6 +118,37 @@ def load_data():
         except Exception as e:
             logger.error(f"Ошибка загрузки доступа к каналам из локального файла: {e}")
 
+async def reload_channel_access():
+    """Принудительно перезагружает доступы из Google Sheets"""
+    global channel_access
+    channel_access = {}
+    
+    if ws:
+        try:
+            records = ws.get_all_values()
+            for row in records[1:]:  # пропускаем заголовок
+                if len(row) > 9 and row[9]:  # channel_access в 10-м столбце
+                    user_id = str(row[0])
+                    accesses = row[9].split(';')
+                    
+                    if user_id not in channel_access:
+                        channel_access[user_id] = {}
+                    
+                    for access in accesses:
+                        if ':' in access:
+                            channel_id, expiry_str = access.split(':', 1)
+                            if expiry_str == "forever":
+                                channel_access[user_id][channel_id] = "forever"
+                            else:
+                                try:
+                                    channel_access[user_id][channel_id] = datetime.fromisoformat(expiry_str)
+                                except ValueError:
+                                    logger.error(f"Неверный формат даты: {expiry_str}")
+            
+            logger.info(f"✅ Перезагружено {sum(len(v) for v in channel_access.values())} доступов из Google Sheets")
+        except Exception as e:
+            logger.error(f"❌ Ошибка перезагрузки доступов: {e}")
+
 def save_data():
     # Сохранение оплаченных файлов
     try:
@@ -169,8 +200,12 @@ async def send_file_to_user(user_id: int, file_id: str, caption: str = "Ваш �
 
 # === Проверка и удаление просроченных доступов ===
 async def check_expired_access():
+    # ПЕРЕЗАГРУЖАЕМ ДАННЫЕ ПЕРЕД КАЖДОЙ ПРОВЕРКОЙ
+    await reload_channel_access()
+    
     now = datetime.now()
     logger.info(f"🔍 [ПРОВЕРКА] Начало проверки в {now}")
+    logger.info(f"🔍 [ДАННЫЕ] Загружено доступов: {len(channel_access)}")
     
     # Проверка файлов
     expired_files = []
@@ -702,6 +737,15 @@ async def cmd_debug_access(message: Message):
     else:
         await message.answer("📭 Нет активных доступов")
 
+@dp.message(Command("reload"))
+async def cmd_reload(message: Message):
+    """Принудительная перезагрузка данных из Google Sheets"""
+    if message.from_user.id != ADMIN_ID:
+        return
+        
+    await reload_channel_access()
+    await message.answer("✅ Данные перезагружены из Google Sheets!")
+
 # Обработчики кнопок
 @dp.callback_query(F.data.startswith("buy_file:"))
 async def buy_file_callback(callback: types.CallbackQuery):
@@ -983,7 +1027,6 @@ async def process_button_price(message: Message, state: FSMContext):
 async def process_button_channel(message: Message, state: FSMContext):
     try:
         channel_id = message.text.strip()
-        # Простая проверка формата (можно вводить любой ID)
         if not channel_id.startswith('-100'):
             await message.answer("⚠️ ID канала обычно начинается с -100...\nНо продолжаем...")
         
@@ -1005,19 +1048,15 @@ async def process_button_days(message: Message, state: FSMContext):
             
         days = int(days_str)
         
-        # Добавляем кнопку в список
         data = await state.get_data()
         buttons_data = data.get("buttons_data", [])
-        btn_type = data.get("current_button_type")
         text = data.get("current_button_text")
         price = data.get("current_button_price")
         channel_id = data.get("current_button_channel")
         
-        # Используем новый формат: channel|текст|цена|channel_id|дни
         buttons_data.append(f"channel|{text}|{price}|{channel_id}|{days}")
         await state.update_data(buttons_data=buttons_data)
         
-        # Возвращаемся к выбору типа
         await offer_more_buttons(message, state)
             
     except Exception as e:
@@ -1034,23 +1073,18 @@ async def process_button_file(message: Message, state: FSMContext):
         file_id = message.document.file_id if message.document else message.photo[-1].file_id
         await state.update_data(current_button_file=file_id)
         
-        # Добавляем кнопку в список
         data = await state.get_data()
         buttons_data = data.get("buttons_data", [])
-        btn_type = data.get("current_button_type")
         text = data.get("current_button_text")
         price = data.get("current_button_price")
         file_id = data.get("current_button_file")
         
-        # Генерируем короткий ID и сохраняем маппинг
         short_id = hash(file_id) % 10000
         file_id_mapping[str(short_id)] = file_id
         
-        # Используем новый формат: file|текст|цена|short_id
         buttons_data.append(f"file|{text}|{price}|{short_id}")
         await state.update_data(buttons_data=buttons_data)
         
-        # Возвращаемся к выбору типа
         await offer_more_buttons(message, state)
             
     except Exception as e:
@@ -1065,16 +1099,13 @@ async def process_button_url(message: Message, state: FSMContext):
             await message.answer("❌ URL должен начинаться с http:// или https://")
             return
         
-        # Добавляем кнопку в список
         data = await state.get_data()
         buttons_data = data.get("buttons_data", [])
         text = data.get("current_button_text")
         
-        # Правильный формат: url|текст|url_адрес
         buttons_data.append(f"url|{text}|{url}")
         await state.update_data(buttons_data=buttons_data)
         
-        # Возвращаемся к выбору типа
         await offer_more_buttons(message, state)
             
     except Exception as e:
@@ -1082,7 +1113,6 @@ async def process_button_url(message: Message, state: FSMContext):
         await message.answer("❌ Ошибка")
 
 async def offer_more_buttons(message: Message, state: FSMContext):
-    """Предлагает добавить еще кнопки"""
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📁 Продаваемый файл", callback_data="button_type_file")],
         [InlineKeyboardButton(text="🔐 Приглашение в канал", callback_data="button_type_channel")],
@@ -1094,12 +1124,10 @@ async def offer_more_buttons(message: Message, state: FSMContext):
 
 @dp.callback_query(PostStates.waiting_button_type, F.data == "button_type_done")
 async def process_buttons_done(callback: types.CallbackQuery, state: FSMContext):
-    """Обработка завершения добавления кнопок"""
     await process_final_post(callback.message, state)
     await callback.answer()
 
 async def process_final_post(message: Message, state: FSMContext):
-    """Финальное сохранение поста"""
     try:
         data = await state.get_data()
         text = data.get("text", "")
@@ -1121,13 +1149,10 @@ async def process_final_post(message: Message, state: FSMContext):
             
             user_ids = {str(r["id"]) for r in records if str(r.get("id", "")).strip()}
             
-            # Сохраняем в таблицу (объединяем через |)
             buttons_str = "|".join(buttons_data) if buttons_data else "нет"
             ws.append_row(["", "", "", "", "", post_id, text, photo_id, buttons_str, ""])
-            # Создаем клавиатуру для рассылки
             keyboard = create_buttons_keyboard(buttons_str)
             
-            # Рассылаем пост
             success = 0
             for user_id in user_ids:
                 try:
@@ -1165,38 +1190,31 @@ async def process_final_post(message: Message, state: FSMContext):
 # === Универсальный вебхук для всех платежей ===
 @app.post("/webhook")
 async def universal_webhook(request: Request):
-    """Обрабатывает все типы платежей"""
     try:
         logger.info("=== ПОЛУЧЕН ВЕБХУК ОТ PRODAMUS ===")
         
-        # Получаем данные из формы
         form_data = await request.form()
         data = dict(form_data)
         
         logger.info(f"Данные вебхука: {data}")
         
-        # Проверяем статус оплаты
         if data.get('payment_status') != 'success':
             logger.warning(f"Платеж не успешен: {data.get('payment_status')}")
             return {"status": "error", "message": "Payment not successful"}
         
-        # Извлекаем информацию о платеже
         payment_type, user_id, target_id, days = extract_payment_info(data)
         
         logger.info(f"Извлечено: type={payment_type}, user_id={user_id}, target_id={target_id}, days={days}")
         
         if payment_type == "file":
-            # Обработка оплаты файла
             if user_id not in paid_files:
                 paid_files[user_id] = {}
             paid_files[user_id][target_id] = "forever"
             save_data()
             
-            # Отправляем файл
             await bot.send_message(user_id, "✅ Оплата файла прошла успешно! Вот ваш файл:")
             await send_file_to_user(user_id, target_id, "✅ Ваш файл")
             
-            # Уведомляем админа
             await bot.send_message(
                 ADMIN_ID,
                 f"💰 Пользователь {user_id} оплатил файл\n"
@@ -1205,10 +1223,8 @@ async def universal_webhook(request: Request):
             )
             
         elif payment_type == "channel":
-            # Обработка оплаты доступа к каналу
             invite_link = await grant_channel_access(int(user_id), target_id, days)
             
-            # Отправляем ссылку
             period = "навсегда" if days == 0 else f"{days} дней"
             await bot.send_message(
                 user_id,
@@ -1216,7 +1232,6 @@ async def universal_webhook(request: Request):
                 f"Вот ваша ссылка для входа: {invite_link}"
             )
             
-            # Уведомляем админа
             await bot.send_message(
                 ADMIN_ID,
                 f"💰 Пользователь {user_id} оплатил доступ к каналу\n"
@@ -1242,7 +1257,6 @@ async def startup():
         await bot.set_webhook(WEBHOOK_URL)
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
     
-    # Загружаем данные и запускаем мониторинг
     load_data()
     threading.Thread(target=access_watcher, daemon=True).start()
     logger.info("Бот запущен!")
