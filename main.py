@@ -2,8 +2,6 @@ import os
 import json
 import logging
 import re
-import threading
-import time
 import asyncio
 from datetime import datetime, timedelta
 from urllib.parse import unquote
@@ -201,7 +199,7 @@ async def send_file_to_user(user_id: int, file_id: str, caption: str = "Ваш �
 
 # === Проверка и удаление просроченных доступов ===
 async def check_expired_access():
-    # ПЕРЕЗАГРУЖАЕМ ДАННЫЕ ПЕРЕД КАЖДОЙ ПРОВЕРКОЙ
+    # ПЕРЕЗАГРУЖАЕМ ДАННЫЕ ПЕРЕД КАЖДОЙ ПРОВеркой
     await reload_channel_access()
     
     now = datetime.now()
@@ -237,10 +235,10 @@ async def check_expired_access():
     
     for user_id, channel_id in expired_channels:
         try:
-            # ПЫТАЕМСЯ КИКНУТЬ ПОЛЬЗОВАТЕЛЯ ИЗ КАНАЛА (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+            # ПЫТАЕМСЯ КИКНУТЬ ПОЛЬЗОВАТЕЛЯ ИЗ КАНАЛА
             try:
                 await bot.ban_chat_member(chat_id=int(channel_id), user_id=int(user_id))
-                await asyncio.sleep(1)  # небольшая пауза
+                await asyncio.sleep(1)
                 await bot.unban_chat_member(chat_id=int(channel_id), user_id=int(user_id))
                 logger.info(f"✅ [КИК] Пользователь {user_id} кикнут из канала {channel_id}")
             except Exception as ban_error:
@@ -268,10 +266,9 @@ async def check_expired_access():
                 try:
                     records = ws.get_all_values()
                     for idx, row in enumerate(records[1:], start=2):
-                        if str(row[0]) == user_id:  # находим пользователя
-                            current_access = row[9] if len(row) > 9 else ""  # channel_access в 10-м столбце
+                        if str(row[0]) == user_id:
+                            current_access = row[9] if len(row) > 9 else ""
                             if current_access:
-                                # Удаляем конкретный канал из списка
                                 accesses = current_access.split(';')
                                 new_accesses = [
                                     acc for acc in accesses 
@@ -286,14 +283,12 @@ async def check_expired_access():
             logger.info(f"✅ [УДАЛЕНО] Пользователь {user_id} удалён из канала {channel_id}")
         except Exception as e:
             logger.error(f"❌ [ОШИБКА] При удалении доступа к каналу: {e}")
-            # Если ошибка прав, попробуем хотя бы удалить из базы
             try:
                 del channel_access[user_id][channel_id]
                 if not channel_access[user_id]:
                     del channel_access[user_id]
                 logger.info(f"✅ [БАЗА] Пользователь {user_id} удален из базы (канал {channel_id})")
                 
-                # Все равно отправляем уведомление
                 try:
                     await bot.send_message(
                         int(user_id), 
@@ -315,18 +310,16 @@ async def check_expired_access():
     logger.info(f"🔍 [ПРОВЕРКА] Завершена. Найдено: {len(expired_files)} файлов, {len(expired_channels)} каналов")
 
 # === Фоновая проверка ===
-def access_watcher():
-    logger.info("[WATCHER] Запущен мониторинг доступов")
+async def check_expired_access_task():
+    """Фоновая задача проверки доступов"""
+    logger.info("[BACKGROUND] Запущен мониторинг доступов")
     while True:
         try:
-            # Создаем новый event loop для каждой итерации
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(check_expired_access())
-            loop.close()
+            await check_expired_access()
+            await asyncio.sleep(60)
         except Exception as e:
-            logger.error(f"❌ [WATCHER] Ошибка: {e}")
-        time.sleep(60)
+            logger.error(f"❌ [BACKGROUND] Ошибка: {e}")
+            await asyncio.sleep(60)
 
 # === Генерация ссылок на оплату ===
 def generate_file_payment_link(user_id: int, file_id: str, price: int, file_name: str):
@@ -367,19 +360,16 @@ def extract_payment_info(data: dict) -> tuple:
     
     logger.info(f"DEBUG: order_id={order_id}, order_num={order_num}, customer_extra={customer_extra}")
     
-    # Сначала проверяем order_num (там наш формат)
     if order_num.startswith('channel_'):
         parts = order_num.split('_')
         if len(parts) >= 4:
             return "channel", parts[1], parts[2], int(parts[3])
     
-    # Затем проверяем order_id (старый формат)
     elif order_id.startswith('channel_'):
         parts = order_id.split('_')
         if len(parts) >= 4:
             return "channel", parts[1], parts[2], int(parts[3])
     
-    # Для файлов
     elif order_num.startswith('file_'):
         parts = order_num.split('_')
         if len(parts) >= 3:
@@ -390,7 +380,6 @@ def extract_payment_info(data: dict) -> tuple:
         if len(parts) >= 3:
             return "file", parts[1], '_'.join(parts[2:]), None
     
-    # Пытаемся извлечь из customer_extra (резервный вариант)
     patterns = [
         r'канала (.+?) на (\d+) дней от пользователя (\d+)',
         r'канала (.+?) на (\d+) дн\. от пользователя (\d+)',
@@ -411,11 +400,9 @@ def extract_payment_info(data: dict) -> tuple:
                     days_str = match.group(2)
                     user_id = match.group(3)
                     
-                    # Обрабатываем "навсегда"
                     if 'навсегда' in days_str:
                         days = 0
                     else:
-                        # Извлекаем число из строки
                         days_match = re.search(r'\d+', days_str)
                         days = int(days_match.group()) if days_match else 1
                     
@@ -425,26 +412,21 @@ def extract_payment_info(data: dict) -> tuple:
                 if len(match.groups()) >= 2:
                     return "file", match.group(2), match.group(1), None
     
-    # Последняя попытка - ищем числа в customer_extra
     logger.warning(f"Нестандартный формат данных, пробуем извлечь вручную...")
     
-    # Ищем user_id (обычно 8-10 цифр)
     user_id_match = re.search(r'(\d{8,10})', customer_extra)
     if user_id_match:
         user_id = user_id_match.group(1)
         
-        # Пытаемся найти channel_id (начинается с -100)
         channel_match = re.search(r'(-100\d+)', customer_extra)
         if channel_match:
             channel_id = channel_match.group(1)
             
-            # Ищем количество дней
             days_match = re.search(r'на (\d+) дней', customer_extra)
             days = int(days_match.group(1)) if days_match else 1
             
             return "channel", user_id, channel_id, days
         
-        # Пытаемся найти file_id (начинается с BQAC)
         file_match = re.search(r'(BQACAgI[A-Za-z0-9_-]+)', customer_extra)
         if file_match:
             return "file", user_id, file_match.group(1), None
@@ -455,40 +437,33 @@ def extract_payment_info(data: dict) -> tuple:
 async def grant_channel_access(user_id: int, channel_id: str, days: int):
     """Предоставляет доступ к каналу и сохраняет в Google Sheets"""
     try:
-        # Разбаниваем пользователя
         await bot.unban_chat_member(int(channel_id), user_id)
         
-        # Создаем одноразовую ссылку
         invite = await bot.create_chat_invite_link(
             chat_id=int(channel_id),
             expire_date=None,
             member_limit=1
         )
         
-        # Сохраняем доступ в памяти
         if str(user_id) not in channel_access:
             channel_access[str(user_id)] = {}
         
-        if days == 0:  # навсегда
+        if days == 0:
             channel_access[str(user_id)][channel_id] = "forever"
             expiry_date = "forever"
         else:
             expiry_date = datetime.now() + timedelta(days=days)
             channel_access[str(user_id)][channel_id] = expiry_date
         
-        # Сохраняем доступ в Google Sheets
         if ws:
             try:
-                # Находим запись пользователя
                 records = ws.get_all_values()
-                for idx, row in enumerate(records[1:], start=2):  # пропускаем заголовок
-                    if str(row[0]) == str(user_id):  # проверяем ID в первом столбце
-                        # Обновляем channel_access (10-й столбец, индекс 9)
+                for idx, row in enumerate(records[1:], start=2):
+                    if str(row[0]) == str(user_id):
                         current_access = row[9] if len(row) > 9 else ""
                         new_access = f"{channel_id}:{expiry_date}"
                         
                         if current_access:
-                            # Проверяем, есть ли уже доступ к этому каналу
                             accesses = current_access.split(';')
                             updated = False
                             for i, acc in enumerate(accesses):
@@ -505,7 +480,6 @@ async def grant_channel_access(user_id: int, channel_id: str, days: int):
                             ws.update_cell(idx, 10, new_access)
                         break
                 else:
-                    # Если пользователь не найден, создаем новую запись
                     ws.append_row([
                         user_id, "", "", "", "", "", "", "", "", 
                         f"{channel_id}:{expiry_date}"
@@ -548,7 +522,6 @@ def delete_kb(post_id: int) -> InlineKeyboardMarkup:
     ])
 
 def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]:
-    """Создает клавиатуру из данных кнопки"""
     if not buttons_data or buttons_data == "нет":
         return None
     
@@ -560,7 +533,6 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
         while i < len(buttons):
             button = buttons[i]
             
-            # URL кнопки: url|текст|url_адрес
             if button == "url" and i + 2 < len(buttons):
                 text = buttons[i + 1]
                 url = buttons[i + 2]
@@ -569,7 +541,6 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                     i += 3
                     continue
             
-            # Файловые кнопки: file|текст|цена|short_id
             elif button == "file" and i + 3 < len(buttons):
                 text = buttons[i + 1]
                 price = buttons[i + 2]
@@ -581,7 +552,6 @@ def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]
                 i += 4
                 continue
             
-            # Канальные кнопки: channel|текст|цена|channel_id|дни
             elif button == "channel" and i + 4 < len(buttons):
                 text = buttons[i + 1]
                 price = buttons[i + 2]
@@ -1289,7 +1259,10 @@ async def startup():
         logger.info(f"Webhook установлен: {WEBHOOK_URL}")
     
     load_data()
-    threading.Thread(target=access_watcher, daemon=True).start()
+    
+    # ЗАПУСКАЕМ ФОНОВУЮ ЗАДАЧУ В ТОМ ЖЕ EVENT LOOP
+    asyncio.create_task(check_expired_access_task())
+    
     logger.info("Бот запущен!")
 
 @app.post(WEBHOOK_PATH)
