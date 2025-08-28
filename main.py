@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 import time
+import asyncio
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 from typing import List, Optional, Dict
@@ -236,12 +237,26 @@ async def check_expired_access():
     
     for user_id, channel_id in expired_channels:
         try:
-            # Кикаем пользователя из канала
-            await bot.ban_chat_member(int(channel_id), int(user_id))
-            await bot.unban_chat_member(int(channel_id), int(user_id))
+            # ПЫТАЕМСЯ КИКНУТЬ ПОЛЬЗОВАТЕЛЯ ИЗ КАНАЛА (ИСПРАВЛЕННАЯ ВЕРСИЯ)
+            try:
+                await bot.ban_chat_member(chat_id=int(channel_id), user_id=int(user_id))
+                await asyncio.sleep(1)  # небольшая пауза
+                await bot.unban_chat_member(chat_id=int(channel_id), user_id=int(user_id))
+                logger.info(f"✅ [КИК] Пользователь {user_id} кикнут из канала {channel_id}")
+            except Exception as ban_error:
+                logger.error(f"❌ Ошибка кика пользователя {user_id} из канала {channel_id}: {ban_error}")
             
             # Уведомляем пользователя
-            await bot.send_message(int(user_id), f"⏰ Срок вашего доступа к каналу истёк. Для продления оплатите подписку снова.")
+            try:
+                await bot.send_message(
+                    int(user_id), 
+                    f"⏰ Срок вашего доступа к каналу истёк.\n"
+                    f"📢 Канал: {CHANNELS.get(channel_id, channel_id)}\n"
+                    f"💳 Для продления доступа оплатите подписку снова."
+                )
+                logger.info(f"✉️ [УВЕДОМЛЕНИЕ] Отправлено пользователю {user_id}")
+            except Exception as notify_error:
+                logger.error(f"❌ Не удалось отправить уведомление пользователю {user_id}: {notify_error}")
             
             # Удаляем из хранилища
             del channel_access[user_id][channel_id]
@@ -277,6 +292,19 @@ async def check_expired_access():
                 if not channel_access[user_id]:
                     del channel_access[user_id]
                 logger.info(f"✅ [БАЗА] Пользователь {user_id} удален из базы (канал {channel_id})")
+                
+                # Все равно отправляем уведомление
+                try:
+                    await bot.send_message(
+                        int(user_id), 
+                        f"⏰ Срок вашего доступа к каналу истёк.\n"
+                        f"📢 Канал: {CHANNELS.get(channel_id, channel_id)}\n"
+                        f"💳 Для продления доступа оплатите подписку снова."
+                    )
+                    logger.info(f"✉️ [УВЕДОМЛЕНИЕ] Отправлено пользователю {user_id} (после ошибки)")
+                except Exception as notify_error:
+                    logger.error(f"❌ Не удалось отправить уведомление пользователю {user_id}: {notify_error}")
+                    
             except:
                 pass
     
@@ -291,8 +319,11 @@ def access_watcher():
     logger.info("[WATCHER] Запущен мониторинг доступов")
     while True:
         try:
-            import asyncio
-            asyncio.run(check_expired_access())
+            # Создаем новый event loop для каждой итерации
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(check_expired_access())
+            loop.close()
         except Exception as e:
             logger.error(f"❌ [WATCHER] Ошибка: {e}")
         time.sleep(60)
@@ -517,7 +548,7 @@ def delete_kb(post_id: int) -> InlineKeyboardMarkup:
     ])
 
 def create_buttons_keyboard(buttons_data: str) -> Optional[InlineKeyboardMarkup]:
-    """Создает клавиатуру из данных кнопок"""
+    """Создает клавиатуру из данных кнопки"""
     if not buttons_data or buttons_data == "нет":
         return None
     
