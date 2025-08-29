@@ -20,7 +20,7 @@ from google.oauth2.service_account import Credentials
 
 # === CONFIG ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "7145469393"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "513148972"))
 GSHEET_ID = os.getenv("GSHEET_ID")
 PAYFORM_URL = "https://menyayrealnost.payform.ru"
 USERS_FILE = "paid_users.json"
